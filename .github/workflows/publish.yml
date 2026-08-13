@@ -8,6 +8,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -25,20 +26,27 @@ jobs:
       - id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Build locally first and actually START the container before pushing.
-      # A publish that has never run the image is not a verified publish.
+      # Build exactly once, with the FINAL GHCR tags, load it locally (no
+      # push yet), and smoke-test that artifact. We then push these same
+      # tags explicitly below — never a second, separate build — so the
+      # digest we publish is provably the digest we just ran. Building
+      # twice (test one image, push a freshly-rebuilt other) would publish
+      # an image that had never run, defeating the point of the smoke test.
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
-          tags: todyl-mcp:ci
+          tags: |
+            ghcr.io/shaank0/todyl-mcp:latest
+            ghcr.io/shaank0/todyl-mcp:sha-${{ steps.vars.outputs.sha_short }}
 
       - name: Smoke test the built image
         run: |
           set -e
           docker run -d --name smoke -p 8080:8080 \
-            -e TODYL_CLIENT_ID=dummy -e TODYL_ACCESS_TOKEN=dummy todyl-mcp:ci
+            -e TODYL_CLIENT_ID=dummy -e TODYL_ACCESS_TOKEN=dummy \
+            ghcr.io/shaank0/todyl-mcp:latest
 
           ready=""
           for i in $(seq 1 20); do
@@ -82,10 +90,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/shaank0/todyl-mcp:latest
-            ghcr.io/shaank0/todyl-mcp:sha-${{ steps.vars.outputs.sha_short }}
+      # Push the exact image loaded and smoke-tested above — no rebuild.
+      - name: Push the smoke-tested image
+        run: |
+          set -e
+          docker push ghcr.io/shaank0/todyl-mcp:latest
+          docker push ghcr.io/shaank0/todyl-mcp:sha-${{ steps.vars.outputs.sha_short }}
