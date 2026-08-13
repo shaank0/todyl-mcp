@@ -402,6 +402,68 @@ describe('tenant-report', () => {
     expect(result.content[0].text).toMatch(/not all devices were read/i);
   });
 
+  // --- Final review: incomplete must mean "any reason the numbers may be partial" ---
+
+  it('reports incomplete: true when a section loaded but was TRUNCATED', async () => {
+    // The description tells callers to check `incomplete` before treating any
+    // zero as a real count. A truncated devices sweep yields posture.devices: 0
+    // just as convincingly as a failed read does.
+    const out = payload(
+      await tenantReportTool.execute({ tenant: 'Acme' }, repo({ devicesOverride: { truncated: true } }))
+    );
+    expect(out.incomplete).toBe(true);
+  });
+
+  it('reports incomplete: true when a section was served from a STALE cache', async () => {
+    const out = payload(
+      await tenantReportTool.execute(
+        { tenant: 'Acme' },
+        repo({ invoicesOverride: { staleWarning: 'Todyl could not be refreshed for invoices (503)' } as any })
+      )
+    );
+    expect(out.incomplete).toBe(true);
+  });
+
+  it('validates start_date the same way list-invoices does, before any call', async () => {
+    // Previously unvalidated here while list-invoices refused it pre-flight, so
+    // the same malformed argument reached the wire from one tool and not the other.
+    let invoiceCalls = 0;
+    const guarded = {
+      devices: async () => ({ items: DEVICES, truncated: false }),
+      deploymentGroups: async () => ({ items: GROUPS, truncated: false }),
+      invoices: async () => {
+        invoiceCalls += 1;
+        return { items: INVOICES, truncated: false };
+      },
+    } as unknown as TodylRepository;
+
+    const result = await tenantReportTool.execute({ tenant: 'Acme', start_date: 'DROP TABLE' }, guarded);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/YYYY-MM/);
+    expect(invoiceCalls).toBe(0);
+  });
+
+  it('rejects an inverted window, matching list-invoices exactly', async () => {
+    const result = await tenantReportTool.execute(
+      { tenant: 'Acme', start_date: '2026-03', end_date: '2026-01' },
+      repo()
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/must not be before/);
+  });
+
+  it('names WHICH dataset is stale in the joined warning', async () => {
+    // Three sections' warnings join into one string; an unattributed "could not
+    // be refreshed" leaves the reader unable to tell which section is stale.
+    const out = payload(
+      await tenantReportTool.execute(
+        { tenant: 'Acme' },
+        repo({ invoicesOverride: { staleWarning: 'Todyl could not be refreshed for invoices (503); showing invoices cached 60s ago.' } as any })
+      )
+    );
+    expect(out.warning).toMatch(/for invoices/i);
+  });
+
   it('a not-found answer omits the incomplete note when every dataset loaded', async () => {
     const result = await tenantReportTool.execute({ tenant: 'Ghost Co' }, repo());
     expect(result.isError).toBe(true);

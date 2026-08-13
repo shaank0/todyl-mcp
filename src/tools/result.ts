@@ -82,13 +82,41 @@ export function ambiguousTenantErrorMultiRef<T>(
  * breath. Callers pass `warningFor(dataset, noun)` (and, for multi-dataset
  * tools, their load-failure note) here.
  */
-export function unknownTenantError(refs: TenantRef[], tenant: string, note?: string): ToolResult {
+export function unknownTenantError(
+  refs: TenantRef[],
+  tenant: string,
+  scope: string,
+  note?: string
+): ToolResult {
   const known = [...new Set(refs.map((r) => r.name).filter(Boolean))].sort();
   const caveat = note?.trim() ? ` ${note.trim()}` : '';
   return toolError(
-    `No Todyl tenant matches "${tenant}". Known tenants: ${known.join(', ') || '(none)'}.${caveat}`
+    `No Todyl tenant matches "${tenant}" among ${scope}. ` +
+      `That list is what this tool can see, not every client in Todyl — a client with no ` +
+      `such records yet will be absent here while still existing. Found: ` +
+      `${known.join(', ') || '(none)'}.${caveat}`
   );
 }
+
+/**
+ * What a tool's tenant namespace is actually built from. Passed to
+ * `unknownTenantError` so the denial states its own scope.
+ *
+ * Each list tool knows only its own dataset: a newly-onboarded client with
+ * deployment groups and invoices but no agents deployed yet is genuinely absent
+ * from the devices namespace, on the happy path, with nothing truncated. Saying
+ * "No Todyl tenant matches X. Known tenants: …" there states a dataset-local
+ * fact as a global one, and someone acting on it concludes the client was never
+ * onboarded. (The list tools must NOT union all three datasets to fix this —
+ * that would make `list-devices` fail for a token lacking `billing.invoices:read`,
+ * which is the coupling Task 11's per-section failure tolerance removed.)
+ */
+export const TENANT_SCOPE = {
+  devices: 'tenants that own at least one device',
+  groups: 'tenants that have a deployment group',
+  invoices: 'tenants appearing on an invoice in this window',
+  allReadable: 'the tenants visible in the datasets this report could read',
+} as const;
 
 /**
  * The outcome of resolving a tenant string: either a resolved ref, or an error
@@ -126,17 +154,19 @@ export type TenantResolution =
  * Callers collect every ref every item carries — unconditionally, unfiltered —
  * and call this once.
  *
+ * `scope` names the namespace these refs came from (see `TENANT_SCOPE`) and
  * `notFoundNote` carries how complete the underlying read was — see
- * `unknownTenantError`. Every caller must pass its dataset's warning.
+ * `unknownTenantError`. Every caller must pass both.
  */
 export function resolveTenantOrProblem(
   refs: TenantRef[],
   tenant: string,
+  scope: string,
   notFoundNote?: string
 ): TenantResolution {
   const matches = resolveTenantMatches(refs, tenant);
   if (matches.length === 0) {
-    return { ok: false, problem: unknownTenantError(refs, tenant, notFoundNote) };
+    return { ok: false, problem: unknownTenantError(refs, tenant, scope, notFoundNote) };
   }
   if (matches.length > 1) {
     return {

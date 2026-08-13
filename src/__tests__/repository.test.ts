@@ -140,6 +140,24 @@ describe('repository', () => {
     await expect(repo.devices()).rejects.toMatchObject({ status: 500 });
   });
 
+  it('names the dataset in the stale warning, so a joined warning is attributable', async () => {
+    // tenant-report joins all three sections' warnings into one `warning`
+    // string; "Todyl could not be refreshed (503)" with no subject leaves the
+    // reader unable to tell which of the three is stale.
+    let mode: 'ok' | 'fail' = 'ok';
+    const get = vi.fn(async () => {
+      if (mode === 'fail') throw new TodylError('down', 503);
+      return onePage([{ id: 'g1' }]);
+    });
+    const repo = createRepository({ get } as unknown as TodylClient, { ...config, cacheTtlSeconds: 0 });
+
+    await repo.deploymentGroups();
+    mode = 'fail';
+    const result = await repo.deploymentGroups();
+    expect(result.staleWarning).toMatch(/for deployment groups/i);
+    expect(result.staleWarning).not.toMatch(/for devices/i);
+  });
+
   it('propagates the truncated flag from the sweep', async () => {
     const get = vi.fn(async () => ({ data: [{ id: 'd1' }], meta: { has_more: true, next_cursor: 'C' } }));
     const repo = createRepository({ get } as unknown as TodylClient, { ...config, maxPages: 1 });

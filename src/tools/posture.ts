@@ -2,7 +2,13 @@ import { z } from 'zod';
 import { agentOutdated, isStale, isTenantId, needsReboot, tamperOff } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
 import type { Device, TenantRef } from '../todyl/types.js';
-import { ok, resolveTenantOrProblem, warningFor, type TodylTool } from './result.js';
+import {
+  ok,
+  resolveTenantOrProblem,
+  TENANT_SCOPE,
+  warningFor,
+  type TodylTool,
+} from './result.js';
 
 interface Counts {
   devices: number;
@@ -45,12 +51,20 @@ export const devicePostureSummaryTool: TodylTool = {
     const dataset = await repo.devices();
 
     let scoped = dataset.items;
+    // Echoed in the response — see list-devices.
+    let bound: TenantRef | undefined;
     if (tenant) {
       const candidates = dataset.items.map((d) => d.tenant).filter((t): t is TenantRef => Boolean(t));
       // The warning goes with the not-found answer — a truncated or stale sweep
       // must not report a client as nonexistent when we stopped reading early.
-      const resolved = resolveTenantOrProblem(candidates, tenant, warningFor(dataset));
+      const resolved = resolveTenantOrProblem(
+        candidates,
+        tenant,
+        TENANT_SCOPE.devices,
+        warningFor(dataset)
+      );
       if (!resolved.ok) return resolved.problem;
+      bound = resolved.ref;
       // Filter by the RESOLVED id, never by re-matching the raw search string.
       // A summary is where this matters most: an unrelated tenant folded in here
       // corrupts BOTH the per-tenant breakdown and the totals, and a wrong total
@@ -75,6 +89,7 @@ export const devicePostureSummaryTool: TodylTool = {
     const byTenant = [...perTenant.values()].sort((a, b) => b.devices - a.devices);
 
     return ok({
+      ...(bound ? { tenant: bound.name, tenant_id: bound.id } : {}),
       stale_days: staleDays,
       totals,
       by_tenant: byTenant,

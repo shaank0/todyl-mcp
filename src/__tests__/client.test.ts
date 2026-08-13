@@ -100,17 +100,29 @@ describe('createClient', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
-  it('wraps non-JSON 200 response in a TodylError', async () => {
+  it('wraps non-JSON 200 response in a TodylError, WITHOUT echoing the body', async () => {
+    // CHANGED ASSERTION (final review, Critical 2). This used to require the
+    // body in the message (`/502 Bad Gateway/`). The common cause of a non-JSON
+    // 200 is a truncated response, and a deployment-group body cut mid-JSON
+    // starts `{"data":[{...,"credentials":{"deploy_key":"…` — so echoing it puts
+    // a live enrollment key in the LLM's context and the audit log. An
+    // unparseable body cannot be scrubbed structurally, so no preview is safe.
+    // What replaces it is what actually diagnoses a truncation: status, byte
+    // length, content-type.
+    const body = '<html>502 Bad Gateway</html>';
     const fetchFn = vi.fn(async () => ({
       status: 200,
-      text: async () => '<html>502 Bad Gateway</html>',
+      text: async () => body,
+      headers: { get: (name: string) => (name === 'content-type' ? 'text/html' : null) },
     }));
     const client = createClient(config, fetchFn as never);
     const err = await client.get('/v1/devices').catch((e) => e as TodylError);
     expect(err).toBeInstanceOf(TodylError);
     expect(err.status).toBe(200);
     expect(err.message).toMatch(/non-JSON/i);
-    expect(err.message).toMatch(/502 Bad Gateway/);
+    expect(err.message).not.toContain('502 Bad Gateway');
+    expect(err.message).toContain(`${body.length} bytes`);
+    expect(err.message).toMatch(/text\/html/);
   });
 
   it('retries a rejected fetch once, then succeeds', async () => {

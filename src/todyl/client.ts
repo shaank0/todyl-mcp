@@ -5,10 +5,33 @@ import type { TodylEnvelope } from './types.js';
 export type FetchFn = (
   url: string,
   init: { method: string; headers: Record<string, string> }
-) => Promise<{ status: number; text(): Promise<string> }>;
+) => Promise<{
+  status: number;
+  text(): Promise<string>;
+  headers?: { get(name: string): string | null };
+}>;
 
 export interface TodylClient {
   get<T>(path: string, query?: Record<string, string | number | undefined>): Promise<TodylEnvelope<T>>;
+}
+
+/**
+ * The client is the ONLY place a query string is composed. A caller that bakes
+ * its own `?a=b` into `path` would produce `…?a=b?limit=1000` — a second `?`,
+ * which is not a separator: the previous parameter swallows `?limit=1000` as
+ * part of its value and `limit` is never sent. That shipped once (dated invoice
+ * queries), and it is invisible in output — the tool still labels the window the
+ * caller asked for while the wire carried a different one, plus the page size
+ * silently dropped to Todyl's default. Structured params only; a path carrying
+ * `?` is a programming error and fails loudly rather than reaching the network.
+ */
+function assertNoQueryInPath(path: string): void {
+  if (path.includes('?')) {
+    throw new Error(
+      `Todyl client: path must not contain a query string (got "${path}"). ` +
+        'Pass parameters as the `query` argument so they are encoded exactly once.'
+    );
+  }
 }
 
 /** Reads are retry-safe per Todyl's docs, so a 5xx is retried exactly once. */
@@ -29,6 +52,7 @@ export function createClient(
 
   return {
     async get<T>(path: string, query = {}) {
+      assertNoQueryInPath(path);
       const params = new URLSearchParams();
       for (const [key, value] of Object.entries(query)) {
         if (value !== undefined && value !== '') params.set(key, String(value));
@@ -36,7 +60,7 @@ export function createClient(
       const qs = params.toString();
       const url = `${config.baseUrl}${path}${qs ? `?${qs}` : ''}`;
 
-      let response: { status: number; text(): Promise<string> } | null = null;
+      let response: Awaited<ReturnType<FetchFn>> | null = null;
       let lastError: Error | null = null;
 
       // Single retry loop: up to 2 attempts, handling both rejections and 5xx responses
@@ -84,11 +108,24 @@ export function createClient(
       // Parse response body
       try {
         return JSON.parse(body) as TodylEnvelope<T>;
-      } catch (err) {
-        // Non-JSON 2xx response — wrap in TodylError
-        const preview = body.substring(0, 120);
+      } catch {
+        // Non-JSON 2xx response — wrap in TodylError.
+        //
+        // The body is NEVER echoed. A truncated 200 (chunked response cut by a
+        // proxy) is the common cause, and a deployment-group body cut mid-JSON
+        // begins `{"data":[{"id":"g1",…,"credentials":{"deploy_key":"…` — so a
+        // preview here hands a live enrollment key to the caller, into the LLM's
+        // context and durably into the gateway's audit log. `parse.ts`'s scrub
+        // never runs on this path (it operates on parsed objects), and an
+        // unparseable body cannot be scrubbed structurally at all: there is no
+        // safe preview to take, only a guess. Report what actually helps
+        // diagnose a truncated response instead — status, size, content type.
+        const contentType = response!.headers?.get('content-type') ?? 'unknown';
         throw new TodylError(
-          `Todyl returned a non-JSON response (${response!.status}): ${preview}`,
+          `Todyl returned a non-JSON response (status ${response!.status}, ` +
+            `${body.length} bytes, content-type ${contentType}). The body is not echoed ` +
+            'because an unparseable response cannot be scrubbed of enrollment secrets. ' +
+            'A truncated or proxy-mangled response is the usual cause.',
           response!.status,
           'non_json_response',
           undefined,

@@ -2,9 +2,59 @@ import { z } from 'zod';
 import { isTenantId } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
 import type { Invoice, TenantRef } from '../todyl/types.js';
-import { ok, resolveTenantOrProblem, toolError, warningFor, type TodylTool } from './result.js';
+import {
+  ok,
+  resolveTenantOrProblem,
+  TENANT_SCOPE,
+  toolError,
+  warningFor,
+  type TodylTool,
+  type ToolResult,
+} from './result.js';
 
 const MONTH = /^\d{4}-\d{2}$/;
+
+/**
+ * Validate (and normalise) an invoice month window, pre-flight.
+ *
+ * Exported so `tenant-report` — which takes the same two arguments and hands
+ * them to the same repository call — enforces the same rules. It previously had
+ * none, so `{start_date: "DROP TABLE"}` went to the wire from one tool and was
+ * refused by the other. Shared rather than copied: two copies of a validation
+ * rule are two chances to drift.
+ *
+ * Returns the normalised window (empty strings become undefined) or a
+ * `problem` ToolResult to return directly.
+ */
+export function validateMonthWindow(
+  rawStart?: string,
+  rawEnd?: string
+): { start?: string; end?: string; problem?: ToolResult } {
+  const start = rawStart === '' ? undefined : rawStart;
+  const end = rawEnd === '' ? undefined : rawEnd;
+
+  for (const [label, value] of [['start_date', start], ['end_date', end]] as const) {
+    if (value && !MONTH.test(value)) {
+      return {
+        problem: toolError(`${label} must be in YYYY-MM format (e.g. 2026-04). Got "${value}".`),
+      };
+    }
+    if (value) {
+      const month = parseInt(value.split('-')[1], 10);
+      if (month < 1 || month > 12) {
+        return {
+          problem: toolError(
+            `${label} must have a valid month (01-12) in YYYY-MM format. Got "${value}".`
+          ),
+        };
+      }
+    }
+  }
+  if (start && end && end < start) {
+    return { problem: toolError(`end_date (${end}) must not be before start_date (${start}).`) };
+  }
+  return { start, end };
+}
 
 type InvoiceLike = { tenant?: TenantRef; subtenants?: TenantRef[] };
 
@@ -88,36 +138,31 @@ export const listInvoicesTool: TodylTool = {
       start_date?: string; end_date?: string; tenant?: string;
     };
 
-    // Normalize empty strings to undefined
-    if (start === '') start = undefined;
-    if (end === '') end = undefined;
     if (tenant === '') tenant = undefined;
 
-    for (const [label, value] of [['start_date', start], ['end_date', end]] as const) {
-      if (value && !MONTH.test(value)) {
-        return toolError(`${label} must be in YYYY-MM format (e.g. 2026-04). Got "${value}".`);
-      }
-      if (value) {
-        const month = parseInt(value.split('-')[1], 10);
-        if (month < 1 || month > 12) {
-          return toolError(`${label} must have a valid month (01-12) in YYYY-MM format. Got "${value}".`);
-        }
-      }
-    }
-    if (start && end && end < start) {
-      return toolError(`end_date (${end}) must not be before start_date (${start}).`);
-    }
+    const window = validateMonthWindow(start, end);
+    if (window.problem) return window.problem;
+    start = window.start;
+    end = window.end;
 
     const dataset = await repo.invoices(start, end);
 
     let invoices: (Invoice & { covers_multiple_tenants?: true })[] = dataset.items;
+    // Echoed in the response — see list-devices.
+    let bound: TenantRef | undefined;
     if (tenant) {
       const candidates = dataset.items.flatMap((inv) => invoiceTenantRefs(inv));
       // The warning goes with the not-found answer — denying that a client
       // exists on the strength of a read that stopped early is the same
       // unsupported confidence as reporting a wrong total.
-      const resolved = resolveTenantOrProblem(candidates, tenant, warningFor(dataset, 'invoices'));
+      const resolved = resolveTenantOrProblem(
+        candidates,
+        tenant,
+        TENANT_SCOPE.invoices,
+        warningFor(dataset, 'invoices')
+      );
       if (!resolved.ok) return resolved.problem;
+      bound = resolved.ref;
       // Filter (and mark covers_multiple_tenants) by the RESOLVED id, never by
       // re-matching the raw search string — an unrelated tenant whose opaque id
       // happens to equal the search string must not be folded into this client's
@@ -128,6 +173,7 @@ export const listInvoicesTool: TodylTool = {
 
     return ok({
       window: { start_date: start ?? 'current month', end_date: end ?? 'current month' },
+      ...(bound ? { tenant: bound.name, tenant_id: bound.id } : {}),
       matched: invoices.length,
       invoices,
       ...(warningFor(dataset, 'invoices') ? { warning: warningFor(dataset, 'invoices') } : {}),

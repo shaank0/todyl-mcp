@@ -25,6 +25,14 @@ export function createCache<T>(
       return entry ? { value: entry.value, ageSeconds: age(entry) } : undefined;
     },
 
+    /**
+     * Seed an entry directly. No production caller — `get` is the only writer
+     * the repository uses — and it is kept deliberately, for `peek`'s test:
+     * seeding lets that test construct a known-stale entry without routing
+     * through `get`, so it verifies `peek` alone rather than `peek` composed
+     * with `get`'s write path. Removing it would make the one test that pins
+     * stale-read behaviour depend on the correctness of a second function.
+     */
     set(key: string, value: T) {
       entries.set(key, { value, storedAt: now() });
     },

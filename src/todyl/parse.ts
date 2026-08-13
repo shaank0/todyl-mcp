@@ -32,8 +32,12 @@ export function parseInvoice(raw: unknown): Invoice {
  * wasteful. This asymmetry is deliberate.
  *
  * Input is assumed acyclic (JSON-derived) and requires no cycle detection.
+ *
+ * Exported because the ERROR path is a secret boundary too: `errors.ts` scrubs
+ * a parsed error envelope with this same function, so there is one definition
+ * of "what must never leave" rather than a second list that can drift.
  */
-function deepScrub(value: unknown): unknown {
+export function deepScrub(value: unknown): unknown {
   if (value === null || typeof value !== 'object') {
     return value;
   }

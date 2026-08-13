@@ -2,7 +2,14 @@ import { z } from 'zod';
 import { applyDeviceFilters, projectDevice, type DeviceFilters } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
 import type { TenantRef } from '../todyl/types.js';
-import { ok, resolveTenantOrProblem, toolError, warningFor, type TodylTool } from './result.js';
+import {
+  ok,
+  resolveTenantOrProblem,
+  TENANT_SCOPE,
+  toolError,
+  warningFor,
+  type TodylTool,
+} from './result.js';
 
 const FILTER_SHAPE = {
   tenant: z.string().optional().describe('Tenant name (case-insensitive) or exact tenant id.'),
@@ -38,14 +45,23 @@ export const listDevicesTool: TodylTool = {
     // The raw string never reaches the filter: `tenant`/`tenant_id` are blanked
     // out of whatever came in, and only a RESOLVED id is ever set below.
     const filters: DeviceFilters = { ...rest, tenant: undefined, tenant_id: undefined };
+    // Echoed in the response: two tools asked about the same name must visibly
+    // name the id each one bound, rather than silently disagreeing.
+    let bound: TenantRef | undefined;
 
     if (tenant) {
       const candidates = dataset.items.map((d) => d.tenant).filter((t): t is TenantRef => Boolean(t));
       // The warning goes with the not-found answer: if the sweep hit the page
       // cap or served stale data, "no such tenant" might only mean "we stopped
       // reading before reaching them".
-      const resolved = resolveTenantOrProblem(candidates, tenant, warningFor(dataset));
+      const resolved = resolveTenantOrProblem(
+        candidates,
+        tenant,
+        TENANT_SCOPE.devices,
+        warningFor(dataset)
+      );
       if (!resolved.ok) return resolved.problem;
+      bound = resolved.ref;
       // Filter by the RESOLVED id, never by re-matching the raw search string —
       // an unrelated tenant whose opaque id happens to equal the search string
       // must not be folded into this client's device list.
@@ -56,6 +72,7 @@ export const listDevicesTool: TodylTool = {
     const rows = matched.slice(0, limit).map(projectDevice);
 
     return ok({
+      ...(bound ? { tenant: bound.name, tenant_id: bound.id } : {}),
       matched: matched.length,
       total: dataset.items.length,
       devices: rows,

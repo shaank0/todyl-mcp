@@ -36,6 +36,7 @@ export function createRepository(client: TodylClient, config: TodylConfig) {
   async function load<T>(
     cache: ReturnType<typeof createCache<Swept<T>>>,
     key: string,
+    label: string,
     fetcher: () => Promise<Swept<T>>
   ): Promise<Dataset<T>> {
     try {
@@ -56,22 +57,25 @@ export function createRepository(client: TodylClient, config: TodylConfig) {
       return {
         items: stale.value.items,
         truncated: stale.value.truncated,
+        // Names the dataset: tenant-report joins all three sections' warnings
+        // into one `warning` string, and "could not be refreshed" with no
+        // subject leaves the reader unable to tell which section is stale.
         staleWarning:
-          `Todyl could not be refreshed (${status || 'error'}); showing data cached ` +
-          `${Math.max(0, stale.ageSeconds)}s ago. Underlying error: ${detail}`,
+          `Todyl could not be refreshed for ${label} (${status || 'error'}); showing ` +
+          `${label} cached ${Math.max(0, stale.ageSeconds)}s ago. Underlying error: ${detail}`,
       };
     }
   }
 
   return {
     devices: () =>
-      load(devicesCache, 'devices', async () => {
+      load(devicesCache, 'devices', 'devices', async () => {
         const { items, truncated } = await sweep<unknown>(client, '/v1/devices', config.maxPages);
         return { items: items.map(parseDevice), truncated };
       }),
 
     deploymentGroups: () =>
-      load(groupsCache, 'groups', async () => {
+      load(groupsCache, 'groups', 'deployment groups', async () => {
         const { items, truncated } = await sweep<unknown>(
           client,
           '/v1/deployment-groups',
@@ -82,15 +86,17 @@ export function createRepository(client: TodylClient, config: TodylConfig) {
 
     invoices: (startDate?: string, endDate?: string) => {
       const key = `${startDate ?? ''}..${endDate ?? ''}`;
-      return load(invoicesCache, key, async () => {
-        const params = new URLSearchParams();
-        if (startDate) params.set('start_date', startDate);
-        if (endDate) params.set('end_date', endDate);
-        const qs = params.toString();
+      return load(invoicesCache, key, 'invoices', async () => {
+        // Structured params, NOT a pre-built query string. Baking `?start_date=…`
+        // into the path here produced `…?start_date=X&end_date=Y?limit=1000` on
+        // the wire: `end_date` absorbed `?limit=1000`, so the window queried was
+        // not the window reported, and the page size collapsed to Todyl's
+        // default (truncating ~20x earlier). The client is the single encoder.
         const { items, truncated } = await sweep<unknown>(
           client,
-          `/v1/billing/invoices${qs ? `?${qs}` : ''}`,
-          config.maxPages
+          '/v1/billing/invoices',
+          config.maxPages,
+          { start_date: startDate, end_date: endDate }
         );
         return { items: items.map(parseInvoice), truncated };
       });

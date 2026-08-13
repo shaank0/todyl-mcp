@@ -3,8 +3,15 @@ import { agentOutdated, isStale, isTenantId, needsReboot, tamperOff } from '../f
 import { TodylError } from '../todyl/errors.js';
 import type { Dataset, TodylRepository } from '../todyl/repository.js';
 import type { DeploymentGroup, Device, Invoice, TenantRef } from '../todyl/types.js';
-import { filterInvoicesForTenantId, invoiceTenantRefs } from './invoices.js';
-import { ok, resolveTenantOrProblem, toolError, warningFor, type TodylTool } from './result.js';
+import { filterInvoicesForTenantId, invoiceTenantRefs, validateMonthWindow } from './invoices.js';
+import {
+  ok,
+  resolveTenantOrProblem,
+  TENANT_SCOPE,
+  toolError,
+  warningFor,
+  type TodylTool,
+} from './result.js';
 
 /** One dataset's outcome: either its usual `Dataset<T>`, or the error that stopped it. */
 type SectionResult<T> =
@@ -50,7 +57,8 @@ export const tenantReportTool: TodylTool = {
     'instead of calling the individual list tools three times. If Todyl refuses one of the three underlying ' +
     'reads (e.g. an API token missing billing access), the other two are still returned, and the failed ' +
     'section is marked with an explicit error rather than an empty list — check `incomplete` before treating ' +
-    'any zero as a real count.',
+    'any zero as a real count. `incomplete` is also true when a read succeeded but was cut short by the page ' +
+    'cap or served from a stale cache; `warning` says which dataset and why.',
   inputSchema: {
     tenant: z.string().describe('Tenant name (case-insensitive) or exact tenant id.'),
     stale_days: z.number().int().nonnegative().optional()
@@ -60,10 +68,17 @@ export const tenantReportTool: TodylTool = {
   },
   readOnly: true,
   async execute(args, repo: TodylRepository) {
-    const { tenant, stale_days: staleDays = 30, start_date: start, end_date: end } = args as {
+    const { tenant, stale_days: staleDays = 30, start_date: rawStart, end_date: rawEnd } = args as {
       tenant: string; stale_days?: number; start_date?: string; end_date?: string;
     };
     const now = new Date();
+
+    // Same pre-flight validation list-invoices applies, from the same function:
+    // both tools hand these straight to repo.invoices(), so an unvalidated
+    // `start_date` here reached the wire while the other tool refused it.
+    const window = validateMonthWindow(rawStart, rawEnd);
+    if (window.problem) return window.problem;
+    const { start, end } = window;
 
     // Each dataset fails or succeeds independently — see loadSection.
     const [devicesResult, groupsResult, invoicesResult] = await Promise.all([
@@ -123,6 +138,7 @@ export const tenantReportTool: TodylTool = {
     const resolved = resolveTenantOrProblem(
       [...allRefs.values()],
       tenant,
+      TENANT_SCOPE.allReadable,
       [incompleteNote, ...warnings].filter(Boolean).join(' ')
     );
     if (!resolved.ok) return resolved.problem;
@@ -153,7 +169,16 @@ export const tenantReportTool: TodylTool = {
       ? filterInvoicesForTenantId(invoicesResult.dataset.items, tenantRef.id)
       : sectionError('invoices', invoicesResult.error);
 
-    const incomplete = !devicesResult.ok || !groupsResult.ok || !invoicesResult.ok;
+    // True for ANY reason a section's numbers might not be the whole picture —
+    // a failed read, a sweep that hit the page cap, or stale cached data. The
+    // description tells callers to check this field before treating a zero as a
+    // real count, and a truncated devices sweep yields `posture.devices: 0` just
+    // as convincingly as a failed one does.
+    const incomplete =
+      !devicesResult.ok ||
+      !groupsResult.ok ||
+      !invoicesResult.ok ||
+      warnings.length > 0;
 
     return ok({
       tenant: tenantRef.name ?? tenant,
