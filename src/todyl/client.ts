@@ -1,5 +1,5 @@
 import type { TodylConfig } from '../config.js';
-import { toTodylError } from './errors.js';
+import { TodylError, toTodylError } from './errors.js';
 import type { TodylEnvelope } from './types.js';
 
 export type FetchFn = (
@@ -36,14 +36,67 @@ export function createClient(
       const qs = params.toString();
       const url = `${config.baseUrl}${path}${qs ? `?${qs}` : ''}`;
 
-      let response = await attempt(url);
-      if (response.status >= 500) response = await attempt(url);
+      let response: { status: number; text(): Promise<string> };
+      let fetchError: Error | null = null;
+
+      // First attempt
+      try {
+        response = await attempt(url);
+      } catch (err) {
+        fetchError = err instanceof Error ? err : new Error(String(err));
+        // Retry on fetch rejection
+        try {
+          response = await attempt(url);
+          fetchError = null; // Clear error on successful retry
+        } catch (retryErr) {
+          // Both attempts failed — throw TodylError with status 0
+          const cause = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          throw new TodylError(
+            `Todyl API request failed: ${cause}`,
+            0,
+            'network_error',
+            undefined,
+            undefined
+          );
+        }
+      }
+
+      // Retry 5xx after first success
+      if (response.status >= 500) {
+        try {
+          response = await attempt(url);
+        } catch (err) {
+          // Retry rejection on 5xx — treat as another 5xx
+          const cause = err instanceof Error ? err.message : String(err);
+          throw new TodylError(
+            `Todyl API request failed: ${cause}`,
+            0,
+            'network_error',
+            undefined,
+            undefined
+          );
+        }
+      }
 
       const body = await response.text();
       if (response.status < 200 || response.status >= 300) {
         throw toTodylError(response.status, body);
       }
-      return JSON.parse(body) as TodylEnvelope<T>;
+
+      // Parse response body
+      try {
+        return JSON.parse(body) as TodylEnvelope<T>;
+      } catch (err) {
+        // Non-JSON 2xx response — wrap in TodylError
+        const preview = body.substring(0, 120);
+        throw new TodylError(
+          `Todyl returned a non-JSON response (200): ${preview}`,
+          response.status,
+          'non_json_response',
+          undefined,
+          undefined
+        );
+      }
     },
   };
 }

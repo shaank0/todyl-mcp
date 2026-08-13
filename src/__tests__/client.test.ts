@@ -56,21 +56,23 @@ describe('createClient', () => {
   });
 
   it('names BOTH causes on 403', async () => {
-    const body = { error: { code: 'forbidden', message: 'no', request_id: 'req_2' } };
-    const client = createClient(config, (async () => respond(403, body)) as never);
+    const fetchFn = vi.fn(async () => respond(403, { error: { code: 'forbidden', message: 'no', request_id: 'req_2' } }));
+    const client = createClient(config, fetchFn as never);
     const err = await client.get('/v1/devices').catch((e) => e as TodylError);
     expect(err.status).toBe(403);
     expect(err.message).toMatch(/allowed source ip/i);
     expect(err.message).toMatch(/ACL/i);
     expect(err.requestId).toBe('req_2');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces error.param on 400', async () => {
-    const body = { error: { code: 'invalid_request', message: 'bad', param: 'cursor' } };
-    const client = createClient(config, (async () => respond(400, body)) as never);
+    const fetchFn = vi.fn(async () => respond(400, { error: { code: 'invalid_request', message: 'bad', param: 'cursor' } }));
+    const client = createClient(config, fetchFn as never);
     const err = await client.get('/v1/devices').catch((e) => e as TodylError);
     expect(err.param).toBe('cursor');
     expect(err.message).toMatch(/cursor/);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it('retries a 5xx exactly once, then succeeds', async () => {
@@ -96,5 +98,41 @@ describe('createClient', () => {
     const client = createClient(config, fetchFn as never);
     await expect(client.get('/v1/devices')).rejects.toBeInstanceOf(TodylError);
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('wraps non-JSON 200 response in a TodylError', async () => {
+    const fetchFn = vi.fn(async () => ({
+      status: 200,
+      text: async () => '<html>502 Bad Gateway</html>',
+    }));
+    const client = createClient(config, fetchFn as never);
+    const err = await client.get('/v1/devices').catch((e) => e as TodylError);
+    expect(err).toBeInstanceOf(TodylError);
+    expect(err.status).toBe(200);
+    expect(err.message).toMatch(/non-JSON/i);
+    expect(err.message).toMatch(/502 Bad Gateway/);
+  });
+
+  it('retries a rejected fetch once, then succeeds', async () => {
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValueOnce(respond(200, OK));
+    const client = createClient(config, fetchFn as never);
+    const result = await client.get('/v1/devices');
+    expect(result.data).toHaveLength(1);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('wraps twice-rejected fetch in a TodylError with status 0', async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error('DNS lookup failed');
+    });
+    const client = createClient(config, fetchFn as never);
+    const err = await client.get('/v1/devices').catch((e) => e as TodylError);
+    expect(err).toBeInstanceOf(TodylError);
+    expect(err.status).toBe(0);
+    expect(err.message).toMatch(/DNS lookup failed/);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 });
