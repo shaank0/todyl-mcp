@@ -9,6 +9,17 @@ const GROUPS = [
 ];
 const INVOICES = [
   { id: 'inv1', status: 'paid', subtotal: 14250, currency: 'USD', tenant: { id: 't1', name: 'Acme' } },
+  {
+    id: 'inv2',
+    status: 'pending',
+    subtotal: 8500,
+    currency: 'USD',
+    tenant: { id: 't1', name: 'Acme' },
+    subtenants: [
+      { id: 'ts1', name: 'Acme UK' },
+      { id: 'ts2', name: 'Acme EU' },
+    ],
+  },
 ];
 
 const payload = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
@@ -28,6 +39,18 @@ describe('list-deployment-groups', () => {
     const out = payload(await listDeploymentGroupsTool.execute({ tenant: 'beta' }, repo));
     expect(out.groups.map((g: { id: string }) => g.id)).toEqual(['g2']);
   });
+
+  it('refuses an ambiguous tenant name', async () => {
+    const clash = [
+      { id: 'g1', name: 'Default', tenant: { id: 't1', name: 'Shared' }, device_count: 10 },
+      { id: 'g2', name: 'Servers', tenant: { id: 't2', name: 'Shared' }, device_count: 3 },
+    ];
+    const r = { deploymentGroups: async () => ({ items: clash, truncated: false }) } as unknown as TodylRepository;
+    const result = await listDeploymentGroupsTool.execute({ tenant: 'Shared' }, r);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/t1/);
+    expect(result.content[0].text).toMatch(/t2/);
+  });
 });
 
 describe('list-invoices', () => {
@@ -36,6 +59,13 @@ describe('list-invoices', () => {
     const repo = { invoices } as unknown as TodylRepository;
     await listInvoicesTool.execute({ start_date: '2026-01', end_date: '2026-03' }, repo);
     expect(invoices).toHaveBeenCalledWith('2026-01', '2026-03');
+  });
+
+  it('passes undefined for missing dates to the repository', async () => {
+    const invoices = vi.fn(async () => ({ items: INVOICES, truncated: false }));
+    const repo = { invoices } as unknown as TodylRepository;
+    await listInvoicesTool.execute({ end_date: '2026-03' }, repo);
+    expect(invoices).toHaveBeenCalledWith(undefined, '2026-03');
   });
 
   it('rejects a malformed month before calling Todyl', async () => {
@@ -47,6 +77,42 @@ describe('list-invoices', () => {
     expect(invoices).not.toHaveBeenCalled();
   });
 
+  it('rejects month 00 before calling Todyl', async () => {
+    const invoices = vi.fn();
+    const repo = { invoices } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ start_date: '2026-00' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/valid month \(01-12\)/);
+    expect(invoices).not.toHaveBeenCalled();
+  });
+
+  it('rejects month 13 before calling Todyl', async () => {
+    const invoices = vi.fn();
+    const repo = { invoices } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ end_date: '2026-13' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/valid month \(01-12\)/);
+    expect(invoices).not.toHaveBeenCalled();
+  });
+
+  it('rejects end_date before start_date', async () => {
+    const invoices = vi.fn();
+    const repo = { invoices } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ start_date: '2026-03', end_date: '2026-01' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/must not be before/);
+    expect(invoices).not.toHaveBeenCalled();
+  });
+
+  it('normalizes empty-string dates to undefined and echoes current month', async () => {
+    const invoices = vi.fn(async () => ({ items: INVOICES, truncated: false }));
+    const repo = { invoices } as unknown as TodylRepository;
+    const out = payload(await listInvoicesTool.execute({ start_date: '', end_date: '' }, repo));
+    expect(invoices).toHaveBeenCalledWith(undefined, undefined);
+    expect(out.window.start_date).toBe('current month');
+    expect(out.window.end_date).toBe('current month');
+  });
+
   it('filters by tenant', async () => {
     const repo = {
       invoices: async () => ({ items: INVOICES, truncated: false }),
@@ -54,6 +120,50 @@ describe('list-invoices', () => {
     const none = payload(await listInvoicesTool.execute({ tenant: 'Beta' }, repo));
     expect(none.invoices).toHaveLength(0);
     const some = payload(await listInvoicesTool.execute({ tenant: 'Acme' }, repo));
-    expect(some.invoices).toHaveLength(1);
+    expect(some.invoices).toHaveLength(2);
+  });
+
+  it('filters by subtenant name and marks as covering multiple tenants', async () => {
+    const repo = {
+      invoices: async () => ({ items: INVOICES, truncated: false }),
+    } as unknown as TodylRepository;
+    const out = payload(await listInvoicesTool.execute({ tenant: 'acme uk' }, repo));
+    expect(out.invoices).toHaveLength(1);
+    expect(out.invoices[0].covers_multiple_tenants).toBe(true);
+  });
+
+  it('filters by primary tenant name without marking as covering multiple tenants', async () => {
+    const repo = {
+      invoices: async () => ({ items: INVOICES, truncated: false }),
+    } as unknown as TodylRepository;
+    const out = payload(await listInvoicesTool.execute({ tenant: 'Acme' }, repo));
+    const withSubtenants = out.invoices.find((i: { id: string }) => i.id === 'inv2');
+    expect(withSubtenants).toBeDefined();
+    expect(withSubtenants.covers_multiple_tenants).toBeUndefined();
+  });
+
+  it('refuses an ambiguous tenant name spanning tenant and subtenant', async () => {
+    const clash = [
+      {
+        id: 'inv1',
+        status: 'paid',
+        subtotal: 5000,
+        currency: 'USD',
+        tenant: { id: 't1', name: 'Acme' },
+      },
+      {
+        id: 'inv2',
+        status: 'paid',
+        subtotal: 8000,
+        currency: 'USD',
+        tenant: { id: 't2', name: 'Beta' },
+        subtenants: [{ id: 't3', name: 'Acme' }],
+      },
+    ];
+    const r = { invoices: async () => ({ items: clash, truncated: false }) } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ tenant: 'Acme' }, r);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/t1/);
+    expect(result.content[0].text).toMatch(/t3/);
   });
 });
