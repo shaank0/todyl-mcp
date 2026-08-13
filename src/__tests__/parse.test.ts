@@ -43,6 +43,89 @@ describe('parseDeploymentGroup', () => {
   it('does not fail when credentials is absent', () => {
     expect(parseDeploymentGroup({ id: 'g3' }).id).toBe('g3');
   });
+
+  it('strips credentials nested inside bundle', () => {
+    const withNested = {
+      id: 'g1',
+      bundle: {
+        id: 'b1',
+        credentials: { deploy_key: 'NESTED-IN-BUNDLE' },
+      },
+    };
+    const group = parseDeploymentGroup(withNested) as Record<string, unknown>;
+    const bundleStr = JSON.stringify(group.bundle);
+    expect(bundleStr).not.toContain('NESTED-IN-BUNDLE');
+    expect(bundleStr).not.toContain('deploy_key');
+    expect((group.bundle as Record<string, unknown>).id).toBe('b1');
+  });
+
+  it('strips credentials nested inside products array', () => {
+    const withNested = {
+      id: 'g1',
+      products: [
+        {
+          id: 'p1',
+          credentials: { deploy_key: 'NESTED-IN-PRODUCT' },
+        },
+      ],
+    };
+    const group = parseDeploymentGroup(withNested) as Record<string, unknown>;
+    const prodStr = JSON.stringify(group.products);
+    expect(prodStr).not.toContain('NESTED-IN-PRODUCT');
+    expect(prodStr).not.toContain('deploy_key');
+  });
+
+  it('strips bare deploy_key at top level', () => {
+    const withBareKey = {
+      id: 'g1',
+      deploy_key: 'BARE-TOP-LEVEL-KEY',
+    };
+    const group = parseDeploymentGroup(withBareKey) as Record<string, unknown>;
+    expect(group.deploy_key).toBeUndefined();
+    expect(JSON.stringify(group)).not.toContain('BARE-TOP-LEVEL-KEY');
+  });
+
+  it('strips bare temporary_deploy_key nested inside bundle', () => {
+    const withBareKey = {
+      id: 'g1',
+      bundle: {
+        id: 'b1',
+        temporary_deploy_key: 'BARE-NESTED-TEMP-KEY',
+      },
+    };
+    const group = parseDeploymentGroup(withBareKey) as Record<string, unknown>;
+    const bundleStr = JSON.stringify(group.bundle);
+    expect(bundleStr).not.toContain('BARE-NESTED-TEMP-KEY');
+    expect(bundleStr).not.toContain('temporary_deploy_key');
+  });
+
+  it('deep copy prevents mutation of input', () => {
+    const input = {
+      id: 'g1',
+      bundle: { id: 'b1', name: 'Bundle' },
+    };
+    const group = parseDeploymentGroup(input) as Record<string, unknown>;
+    const groupBundle = group.bundle as Record<string, unknown>;
+    groupBundle.name = 'MUTATED';
+    expect((input.bundle as Record<string, unknown>).name).toBe('Bundle');
+  });
+
+  it('preserves nested non-secret fields intact', () => {
+    const complex = {
+      id: 'g1',
+      name: 'Group',
+      bundle: { id: 'b1', name: 'BundleName' },
+      products: [
+        { id: 'p1', type: 'edr', display_name: 'EDR Product' },
+      ],
+      tenant: { id: 't1', name: 'TenantName' },
+    };
+    const group = parseDeploymentGroup(complex);
+    expect(group.name).toBe('Group');
+    expect((group.bundle as any).name).toBe('BundleName');
+    expect((group.products as any)[0].display_name).toBe('EDR Product');
+    expect((group.tenant as any).name).toBe('TenantName');
+  });
 });
 
 describe('parseDevice / parseInvoice', () => {
