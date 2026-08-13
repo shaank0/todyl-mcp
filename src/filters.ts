@@ -35,21 +35,63 @@ export function matchesTenant(ref: TenantRef | undefined, needle: string): boole
 }
 
 /**
+ * Resolve which tenant(s) in a candidate set match a search string, preferring
+ * exact NAME matches and falling back to id equality only when no name matches
+ * exist. Todyl tenant ids are opaque 28-character strings; a human types a
+ * recognizable company NAME and pastes an id only when they explicitly mean to
+ * disambiguate. Without this precedence, an unrelated tenant whose opaque id
+ * happens to equal the search string would compete with a clean, unique name
+ * match and force a spurious refusal (or, worse, get silently folded into a
+ * filtered result) — see docs/superpowers/plans task-11 fix rounds 1–2.
+ *
+ * This is a SET-level policy — it must be applied over the WHOLE candidate set
+ * at once, never one ref at a time. A single ref evaluated in isolation always
+ * "looks like" the entire set, so an id-only match tested alone would win where
+ * a name match elsewhere in the true candidate set should have taken precedence
+ * and the id-only match should have been ignored entirely. Every caller
+ * (`distinctTenantsMatching`, `ambiguousTenantErrorMultiRef`) must collect every
+ * candidate ref FIRST and call this once over the complete list.
+ *
+ * `matchesTenant` remains the plain per-ref boolean primitive used by per-item
+ * filters (e.g. `applyDeviceFilters`) where no such precedence is wanted — only
+ * resolution and ambiguity detection go through this function.
+ */
+export function resolveTenantMatches(refs: TenantRef[], needle: string): TenantRef[] {
+  const wanted = needle.trim().toLowerCase();
+  const byName = new Map<string, TenantRef>();
+  for (const ref of refs) {
+    if (ref && (ref.name ?? '').toLowerCase() === wanted) byName.set(ref.id, ref);
+  }
+  if (byName.size > 0) return [...byName.values()];
+
+  const trimmed = needle.trim();
+  const byId = new Map<string, TenantRef>();
+  for (const ref of refs) {
+    if (ref && ref.id === trimmed) byId.set(ref.id, ref);
+  }
+  return [...byId.values()];
+}
+
+/**
  * The distinct tenants a name or id matches. Two different clients can share
  * a display name, and silently merging their devices into one answer would be
  * worse than refusing — so tools use this to detect ambiguity and ask for an id.
+ *
+ * Collects every item's ref FIRST (regardless of whether it matches) and applies
+ * `resolveTenantMatches` once over the complete candidate set — see that
+ * function's docs for why this must not be done ref-by-ref.
  */
 export function distinctTenantsMatching<T>(
   items: T[],
   needle: string,
   pick: (item: T) => TenantRef | undefined
 ): TenantRef[] {
-  const byId = new Map<string, TenantRef>();
+  const candidates: TenantRef[] = [];
   for (const item of items) {
     const ref = pick(item);
-    if (ref && matchesTenant(ref, needle)) byId.set(ref.id, ref);
+    if (ref) candidates.push(ref);
   }
-  return [...byId.values()];
+  return resolveTenantMatches(candidates, needle);
 }
 
 export interface DeviceFilters {

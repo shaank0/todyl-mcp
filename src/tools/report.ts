@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { agentOutdated, isStale, matchesTenant, needsReboot, tamperOff } from '../filters.js';
+import { agentOutdated, isStale, matchesTenant, needsReboot, resolveTenantMatches, tamperOff } from '../filters.js';
 import { TodylError } from '../todyl/errors.js';
 import type { Dataset, TodylRepository } from '../todyl/repository.js';
 import type { DeploymentGroup, Device, Invoice, TenantRef } from '../todyl/types.js';
-import { allTenantRefsMatching, filterInvoicesForTenant } from './invoices.js';
+import { filterInvoicesForTenant, invoiceTenantRefs } from './invoices.js';
 import { ambiguousTenantErrorMultiRef, ok, toolError, warningFor, type TodylTool } from './result.js';
 
 /** One dataset's outcome: either its usual `Dataset<T>`, or the error that stopped it. */
@@ -39,37 +39,6 @@ function sectionError(datasetLabel: string, error: { status: number; message: st
     status: error.status || undefined,
     message: error.message,
   };
-}
-
-/**
- * Resolve which tenant(s) a search string identifies, from the union of ALL
- * tenant refs seen across every dataset that succeeded (deduped by id) —
- * not from devices alone, so a tenant with billing but no enrolled endpoints
- * is still resolvable.
- *
- * Exact NAME matches are tried first; id matches are only consulted as a
- * fallback when no name matches exist. A human types a company NAME; an id
- * is only ever pasted in deliberately to disambiguate. Without this
- * precedence, an unrelated tenant whose opaque id happens to equal the
- * search string would compete with a clean, unique name match and force a
- * spurious refusal — exactly the over-refusal the fix-round-1 ruling called
- * out. Because both passes still delegate to the same `matchesTenant` rule
- * used everywhere else, a genuine ambiguity (two tenants sharing a NAME, or
- * two sharing an id) is still caught.
- */
-function resolveTenantMatches(allRefs: TenantRef[], tenant: string): TenantRef[] {
-  const needle = tenant.trim().toLowerCase();
-  const byName = new Map<string, TenantRef>();
-  for (const ref of allRefs) {
-    if ((ref.name ?? '').toLowerCase() === needle) byName.set(ref.id, ref);
-  }
-  if (byName.size > 0) return [...byName.values()];
-
-  const byId = new Map<string, TenantRef>();
-  for (const ref of allRefs) {
-    if (ref.id === tenant.trim()) byId.set(ref.id, ref);
-  }
-  return [...byId.values()];
 }
 
 export const tenantReportTool: TodylTool = {
@@ -122,8 +91,7 @@ export const tenantReportTool: TodylTool = {
     if (groupsResult.ok) for (const g of groupsResult.dataset.items) note(g.tenant);
     if (invoicesResult.ok) {
       for (const i of invoicesResult.dataset.items) {
-        note(i.tenant);
-        for (const st of i.subtenants ?? []) note(st);
+        for (const ref of invoiceTenantRefs(i)) note(ref);
       }
     }
 
@@ -137,9 +105,10 @@ export const tenantReportTool: TodylTool = {
     }
     if (matches.length > 1) {
       // Reuses the existing ambiguity-message formatting rather than a new copy.
-      // matchesTenant always re-confirms each of `matches` (they were selected by
-      // name-or-id equality already), so this is guaranteed to return an error —
-      // the fallback exists only to keep the return type sound for TypeScript.
+      // Re-running resolveTenantMatches over exactly `matches` is idempotent (they
+      // were already selected by the same name-first/id-fallback rule), so this is
+      // guaranteed to return an error — the fallback exists only to keep the
+      // return type sound for TypeScript.
       return (
         ambiguousTenantErrorMultiRef(matches, tenant, (ref) => [ref]) ??
         toolError(`More than one tenant matches "${tenant}".`)

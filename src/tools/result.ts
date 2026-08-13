@@ -1,5 +1,5 @@
 import type { z } from 'zod';
-import { distinctTenantsMatching } from '../filters.js';
+import { resolveTenantMatches } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
 import type { TenantRef } from '../todyl/types.js';
 
@@ -35,23 +35,29 @@ function ambiguityMessage(tenant: string, matches: TenantRef[]): string {
 
 /**
  * Check for ambiguous tenant matches across a picker that returns multiple refs.
- * Deduplicates by tenant id and returns error if more than one distinct tenant matches.
+ *
+ * Collects EVERY candidate ref from EVERY item first — regardless of whether it
+ * matches — then resolves the whole set once via `resolveTenantMatches`. This
+ * must not test refs one at a time: `resolveTenantMatches`'s name-first/id-
+ * fallback precedence is a SET-level policy, and a single ref evaluated alone
+ * always looks like the entire candidate set, which would let an id-only match
+ * win in isolation even when a name match elsewhere in the true set should have
+ * beaten it. Callers' `pick` should therefore return every ref an item carries
+ * unconditionally (e.g. an invoice's primary tenant AND its subtenants), not a
+ * pre-filtered subset.
  */
 export function ambiguousTenantErrorMultiRef<T>(
   items: T[],
   tenant: string,
   pick: (item: T) => TenantRef[]
 ): ToolResult | undefined {
-  const byId = new Map<string, TenantRef>();
+  const candidates: TenantRef[] = [];
   for (const item of items) {
-    const refs = pick(item);
-    for (const ref of refs) {
-      if (ref && distinctTenantsMatching([ref], tenant, (r) => r).length > 0) {
-        byId.set(ref.id, ref);
-      }
+    for (const ref of pick(item)) {
+      if (ref) candidates.push(ref);
     }
   }
-  const matches = [...byId.values()];
+  const matches = resolveTenantMatches(candidates, tenant);
   if (matches.length <= 1) return undefined;
   return toolError(ambiguityMessage(tenant, matches));
 }

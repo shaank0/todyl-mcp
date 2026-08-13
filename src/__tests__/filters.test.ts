@@ -6,6 +6,7 @@ import {
   isStale,
   needsReboot,
   projectDevice,
+  resolveTenantMatches,
   tamperOff,
 } from '../filters.js';
 import type { Device } from '../todyl/types.js';
@@ -159,6 +160,38 @@ describe('distinctTenantsMatching', () => {
 
   it('returns nothing when no tenant matches', () => {
     expect(distinctTenantsMatching(DEVICES, 'Nope', (d) => d.tenant)).toHaveLength(0);
+  });
+});
+
+describe('resolveTenantMatches', () => {
+  it('prefers a clean NAME match over an unrelated tenant whose id equals the search string', () => {
+    // Real, unique name match: t1/"Acme". Unrelated: a tenant literally id'd "Acme".
+    // Fed the FULL candidate set (as every caller must), the resolver must pick
+    // only the name match — this is the set-level policy fix round 2 lifted from
+    // tenant-report into the shared helper.
+    const refs = [
+      { id: 't1', name: 'Acme' },
+      { id: 'Acme', name: 'Randoco' },
+    ];
+    const matches = resolveTenantMatches(refs, 'Acme');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].id).toBe('t1');
+  });
+
+  it('falls back to id matching only when no name matches exist', () => {
+    const refs = [
+      { id: 't1', name: 'Acme' },
+      { id: 't9', name: 'Beta' },
+    ];
+    expect(resolveTenantMatches(refs, 't9')).toEqual([{ id: 't9', name: 'Beta' }]);
+  });
+
+  it('still reports a genuine ambiguity when two tenants share a NAME', () => {
+    const refs = [
+      { id: 't1', name: 'Shared' },
+      { id: 't9', name: 'Shared' },
+    ];
+    expect(resolveTenantMatches(refs, 'Shared')).toHaveLength(2);
   });
 });
 

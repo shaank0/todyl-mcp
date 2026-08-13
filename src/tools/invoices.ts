@@ -26,20 +26,19 @@ export function invoiceMatchesTenant(
 }
 
 /**
- * Extract all tenants that match a search string, including both primary tenant and subtenants.
- * Exported for reuse by other tools' ambiguity checks (ambiguousTenantErrorMultiRef pickers).
+ * Every tenant ref an invoice carries — its primary tenant plus any subtenants —
+ * regardless of whether any of them match a search string. This is the
+ * UNFILTERED candidate picker for `ambiguousTenantErrorMultiRef`: the shared
+ * `resolveTenantMatches` resolver needs the full candidate set to apply its
+ * name-first/id-fallback precedence, so pre-filtering here (as this function
+ * used to) would defeat that policy before it ever ran. Exported for reuse by
+ * other tools that need every tenant an invoice touches (e.g. tenant-report).
  */
-export function allTenantRefsMatching(invoice: InvoiceLike, needle: string): TenantRef[] {
-  const matches: TenantRef[] = [];
-  if (matchesTenant(invoice.tenant, needle)) matches.push(invoice.tenant!);
-  if (invoice.subtenants) {
-    for (const st of invoice.subtenants) {
-      if (matchesTenant(st, needle) && !matches.some((m) => m.id === st.id)) {
-        matches.push(st);
-      }
-    }
-  }
-  return matches;
+export function invoiceTenantRefs(invoice: InvoiceLike): TenantRef[] {
+  const refs: TenantRef[] = [];
+  if (invoice.tenant) refs.push(invoice.tenant);
+  if (invoice.subtenants) refs.push(...invoice.subtenants);
+  return refs;
 }
 
 /**
@@ -106,9 +105,7 @@ export const listInvoicesTool: TodylTool = {
     const dataset = await repo.invoices(start, end);
 
     if (tenant) {
-      const clash = ambiguousTenantErrorMultiRef(dataset.items, tenant, (inv) =>
-        allTenantRefsMatching(inv, tenant)
-      );
+      const clash = ambiguousTenantErrorMultiRef(dataset.items, tenant, (inv) => invoiceTenantRefs(inv));
       if (clash) return clash;
     }
 

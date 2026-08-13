@@ -113,6 +113,20 @@ describe('list-devices', () => {
     );
     expect(out.warning).toMatch(/503/);
   });
+
+  it('resolves a name cleanly even when an unrelated tenant\'s id equals it (fix round 2)', async () => {
+    // 'Acme' is a clean, unique NAME match. Unrelated to Acme, "Randoco"'s tenant
+    // happens to carry the literal id "Acme". A flat id-or-name match would treat
+    // this as a second candidate and refuse a legitimate query — the shared
+    // resolveTenantMatches resolver (name-first, id-fallback) must not.
+    const collision = [
+      { id: 'x', name: 'A', tenant: { id: 't1', name: 'Acme' } },
+      { id: 'y', name: 'B', tenant: { id: 'Acme', name: 'Randoco' } },
+    ] as Device[];
+    const r = { devices: async () => ({ items: collision, truncated: false }) } as unknown as TodylRepository;
+    const result = await listDevicesTool.execute({ tenant: 'Acme' }, r);
+    expect(result.isError).toBeFalsy();
+  });
 });
 
 describe('get-device', () => {
