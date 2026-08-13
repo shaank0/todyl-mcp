@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { matchesTenant, distinctTenantsMatching } from '../filters.js';
+import { matchesTenant } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
-import { ambiguousTenantError, ok, toolError, warningFor, type TodylTool } from './result.js';
+import { ambiguousTenantErrorMultiRef, ok, toolError, warningFor, type TodylTool } from './result.js';
 
 const MONTH = /^\d{4}-\d{2}$/;
 
@@ -37,13 +37,26 @@ function allTenantRefsMatching(
   return matches;
 }
 
+/**
+ * Helper for building a picker for ambiguousTenantErrorMultiRef.
+ */
+function pickAllInvoiceTenants(
+  invoice: { tenant?: { id: string; name: string }; subtenants?: { id: string; name: string }[] },
+  needle: string
+): { id: string; name: string }[] {
+  return allTenantRefsMatching(invoice, needle);
+}
+
 export const listInvoicesTool: TodylTool = {
   name: 'list-invoices',
   title: 'List Todyl invoices',
   description:
     'List invoices issued to your Todyl partner tenant within a month window. Both dates are YYYY-MM and ' +
     'inclusive; they default to the current month, and Todyl only retains 12 months. Returns status, period, ' +
-    'subtotal, currency and the tenant (plus subtenants) each invoice covers.',
+    'subtotal, currency and the tenant (plus subtenants) each invoice covers. When filtering by tenant, ' +
+    'invoices matching via the primary tenant are returned without flags. If a match comes via a subtenant, ' +
+    'the invoice is marked `covers_multiple_tenants: true` because its subtotal spans the parent tenant and ' +
+    'all its subtenants—not the subtenant alone.',
   inputSchema: {
     start_date: z.string().optional().describe('First month of the window, YYYY-MM. At most 12 months ago.'),
     end_date: z.string().optional().describe('Last month of the window, YYYY-MM. Must not be before start_date.'),
@@ -78,28 +91,18 @@ export const listInvoicesTool: TodylTool = {
     const dataset = await repo.invoices(start, end);
 
     if (tenant) {
-      // Build ambiguity check across both primary tenant and subtenants
-      const allMatches = new Map<string, { id: string; name: string }>();
-      for (const invoice of dataset.items) {
-        const matches = allTenantRefsMatching(invoice, tenant);
-        for (const match of matches) {
-          allMatches.set(match.id, match);
-        }
-      }
-      if (allMatches.size > 1) {
-        const candidates = [...allMatches.values()]
-          .map((t) => `${t.name} (${t.id})`)
-          .join('; ');
-        return toolError(
-          `More than one tenant matches "${tenant}" — pass the tenant id instead. Candidates: ${candidates}`
-        );
-      }
+      const clash = ambiguousTenantErrorMultiRef(dataset.items, tenant, (inv) =>
+        pickAllInvoiceTenants(inv, tenant)
+      );
+      if (clash) return clash;
     }
 
     const invoicesWithMarking = dataset.items.map((i) => {
       if (!tenant) return i;
       const { matched, viaTenant } = invoiceMatchesTenant(i, tenant);
       if (!matched) return null;
+      // Only flag when matched via subtenant: the primary tenant legitimately owns the full subtotal.
+      // When the subtenant matches, the subtotal spans parent + all subtenants, not that subtenant alone.
       return {
         ...i,
         ...(viaTenant ? {} : { covers_multiple_tenants: true }),

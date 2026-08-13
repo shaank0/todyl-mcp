@@ -26,6 +26,37 @@ export function toolError(message: string): ToolResult {
 }
 
 /**
+ * Format an ambiguity error when multiple tenants match a search string.
+ */
+function ambiguityMessage(matches: TenantRef[]): string {
+  const candidates = matches.map((t) => `${t.name} (${t.id})`).join('; ');
+  return `More than one tenant matches — pass the tenant id instead. Candidates: ${candidates}`;
+}
+
+/**
+ * Check for ambiguous tenant matches across a picker that returns multiple refs.
+ * Deduplicates by tenant id and returns error if more than one distinct tenant matches.
+ */
+export function ambiguousTenantErrorMultiRef<T>(
+  items: T[],
+  tenant: string,
+  pick: (item: T) => TenantRef[]
+): ToolResult | undefined {
+  const byId = new Map<string, TenantRef>();
+  for (const item of items) {
+    const refs = pick(item);
+    for (const ref of refs) {
+      if (ref && distinctTenantsMatching([ref], tenant, (r) => r).length > 0) {
+        byId.set(ref.id, ref);
+      }
+    }
+  }
+  const matches = [...byId.values()];
+  if (matches.length <= 1) return undefined;
+  return toolError(ambiguityMessage(matches));
+}
+
+/**
  * Refuse an ambiguous tenant name rather than merging two clients' data into
  * one answer. Returns an error result to return directly, or undefined when
  * the name is unambiguous. Every tool accepting `tenant` must call this.
@@ -35,12 +66,10 @@ export function ambiguousTenantError<T>(
   tenant: string,
   pick: (item: T) => TenantRef | undefined
 ): ToolResult | undefined {
-  const matches = distinctTenantsMatching(items, tenant, pick);
-  if (matches.length <= 1) return undefined;
-  const candidates = matches.map((t) => `${t.name} (${t.id})`).join('; ');
-  return toolError(
-    `More than one tenant matches "${tenant}" — pass the tenant id instead. Candidates: ${candidates}`
-  );
+  return ambiguousTenantErrorMultiRef(items, tenant, (item) => {
+    const ref = pick(item);
+    return ref ? [ref] : [];
+  });
 }
 
 /** Combine the sweep-truncation and cache-staleness warnings into one field. */
