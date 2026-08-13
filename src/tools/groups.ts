@@ -28,7 +28,7 @@ export const listDeploymentGroupsTool: TodylTool = {
       matched: groups.length,
       total: dataset.items.length,
       groups,
-      ...(warningFor(dataset) ? { warning: warningFor(dataset) } : {}),
+      ...(warningFor(dataset, 'deployment groups') ? { warning: warningFor(dataset, 'deployment groups') } : {}),
     });
   },
 };

@@ -72,12 +72,22 @@ export function ambiguousTenantError<T>(
   });
 }
 
-/** Combine the sweep-truncation and cache-staleness warnings into one field. */
-export function warningFor(dataset: { truncated: boolean; staleWarning?: string }): string | undefined {
+/**
+ * Combine the sweep-truncation and cache-staleness warnings into one field.
+ *
+ * `noun` names what was being read (plural — "devices", "deployment groups",
+ * "invoices") so the message says which dataset was incomplete rather than
+ * always claiming it was devices. Defaults to "devices" to match every
+ * pre-existing call site's wording.
+ */
+export function warningFor(
+  dataset: { truncated: boolean; staleWarning?: string },
+  noun: string = 'devices'
+): string | undefined {
   const parts: string[] = [];
   if (dataset.truncated) {
     parts.push(
-      'Not all devices were read — the page cap was reached, so these results are incomplete. ' +
+      `Not all ${noun} were read — the page cap was reached, so these results are incomplete. ` +
         'Raise TODYL_MAX_PAGES if this persists.'
     );
   }

@@ -1,16 +1,23 @@
 import { z } from 'zod';
 import { matchesTenant } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
+import type { TenantRef } from '../todyl/types.js';
 import { ambiguousTenantErrorMultiRef, ok, toolError, warningFor, type TodylTool } from './result.js';
 
 const MONTH = /^\d{4}-\d{2}$/;
 
+type InvoiceLike = { tenant?: TenantRef; subtenants?: TenantRef[] };
+
 /**
  * Check if an invoice matches a tenant, either as primary tenant or via subtenants.
  * Returns { matched: boolean, viaTenant: boolean } to track if the match came via a subtenant.
+ *
+ * Exported because the exact "primary vs. subtenant" distinction here is what drives
+ * `covers_multiple_tenants` — a report tool asking "what does client X owe" must use
+ * the same rule list-invoices does, or the same question gets two different answers.
  */
-function invoiceMatchesTenant(
-  invoice: { tenant?: { id: string; name: string }; subtenants?: { id: string; name: string }[] },
+export function invoiceMatchesTenant(
+  invoice: InvoiceLike,
   tenant: string
 ): { matched: boolean; viaTenant: boolean } {
   if (matchesTenant(invoice.tenant, tenant)) return { matched: true, viaTenant: true };
@@ -20,12 +27,10 @@ function invoiceMatchesTenant(
 
 /**
  * Extract all tenants that match a search string, including both primary tenant and subtenants.
+ * Exported for reuse by other tools' ambiguity checks (ambiguousTenantErrorMultiRef pickers).
  */
-function allTenantRefsMatching(
-  invoice: { tenant?: { id: string; name: string }; subtenants?: { id: string; name: string }[] },
-  needle: string
-): { id: string; name: string }[] {
-  const matches: { id: string; name: string }[] = [];
+export function allTenantRefsMatching(invoice: InvoiceLike, needle: string): TenantRef[] {
+  const matches: TenantRef[] = [];
   if (matchesTenant(invoice.tenant, needle)) matches.push(invoice.tenant!);
   if (invoice.subtenants) {
     for (const st of invoice.subtenants) {
@@ -38,13 +43,23 @@ function allTenantRefsMatching(
 }
 
 /**
- * Helper for building a picker for ambiguousTenantErrorMultiRef.
+ * Filter a list of invoices down to those matching a tenant (by primary tenant or
+ * subtenant), marking `covers_multiple_tenants: true` when the match came via a
+ * subtenant — its subtotal spans the parent tenant and all its subtenants, not
+ * just the one that matched. The single source of truth for this rule; reused by
+ * both list-invoices and tenant-report so the same question gets the same answer.
  */
-function pickAllInvoiceTenants(
-  invoice: { tenant?: { id: string; name: string }; subtenants?: { id: string; name: string }[] },
-  needle: string
-): { id: string; name: string }[] {
-  return allTenantRefsMatching(invoice, needle);
+export function filterInvoicesForTenant<T extends InvoiceLike>(
+  items: T[],
+  tenant: string
+): (T & { covers_multiple_tenants?: true })[] {
+  const marked: (T & { covers_multiple_tenants?: true })[] = [];
+  for (const item of items) {
+    const { matched, viaTenant } = invoiceMatchesTenant(item, tenant);
+    if (!matched) continue;
+    marked.push(viaTenant ? item : { ...item, covers_multiple_tenants: true });
+  }
+  return marked;
 }
 
 export const listInvoicesTool: TodylTool = {
@@ -92,30 +107,18 @@ export const listInvoicesTool: TodylTool = {
 
     if (tenant) {
       const clash = ambiguousTenantErrorMultiRef(dataset.items, tenant, (inv) =>
-        pickAllInvoiceTenants(inv, tenant)
+        allTenantRefsMatching(inv, tenant)
       );
       if (clash) return clash;
     }
 
-    const invoicesWithMarking = dataset.items.map((i) => {
-      if (!tenant) return i;
-      const { matched, viaTenant } = invoiceMatchesTenant(i, tenant);
-      if (!matched) return null;
-      // Only flag when matched via subtenant: the primary tenant legitimately owns the full subtotal.
-      // When the subtenant matches, the subtotal spans parent + all subtenants, not that subtenant alone.
-      return {
-        ...i,
-        ...(viaTenant ? {} : { covers_multiple_tenants: true }),
-      };
-    }).filter((i) => i !== null);
-
-    const invoices = tenant ? invoicesWithMarking : dataset.items;
+    const invoices = tenant ? filterInvoicesForTenant(dataset.items, tenant) : dataset.items;
 
     return ok({
       window: { start_date: start ?? 'current month', end_date: end ?? 'current month' },
       matched: invoices.length,
       invoices,
-      ...(warningFor(dataset) ? { warning: warningFor(dataset) } : {}),
+      ...(warningFor(dataset, 'invoices') ? { warning: warningFor(dataset, 'invoices') } : {}),
     });
   },
 };
