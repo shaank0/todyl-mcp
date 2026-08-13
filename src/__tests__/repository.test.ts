@@ -72,9 +72,53 @@ describe('repository', () => {
       cacheTtlSeconds: 0,
     });
 
+    // Populate the cache
     await repo.devices();
     mode = 'fail';
+    // Verify the client IS called (refresh attempted) and the error is rethrown
+    // despite a usable cache existing.
     await expect(repo.devices()).rejects.toMatchObject({ status });
+    expect(get).toHaveBeenCalledTimes(2); // Proves refresh was attempted
+  });
+
+  it('rethrows 400 even with a warm cache', async () => {
+    let mode: 'ok' | 'fail' = 'ok';
+    const get = vi.fn(async () => {
+      if (mode === 'fail') throw new TodylError('bad cursor', 400);
+      return onePage([{ id: 'd1' }]);
+    });
+    const repo = createRepository({ get } as unknown as TodylClient, {
+      ...config,
+      cacheTtlSeconds: 0,
+    });
+
+    // Populate cache
+    await repo.devices();
+    mode = 'fail';
+    // 400 is NOT a transient error; a bad cursor means our code is broken.
+    // Must rethrow despite cache being warm.
+    await expect(repo.devices()).rejects.toMatchObject({ status: 400 });
+    expect(get).toHaveBeenCalledTimes(2); // Proves refresh was attempted
+  });
+
+  it('rethrows bare Error even with a warm cache', async () => {
+    let mode: 'ok' | 'fail' = 'ok';
+    const get = vi.fn(async () => {
+      if (mode === 'fail') throw new Error('TypeError in parseDevice');
+      return onePage([{ id: 'd1' }]);
+    });
+    const repo = createRepository({ get } as unknown as TodylClient, {
+      ...config,
+      cacheTtlSeconds: 0,
+    });
+
+    // Populate cache
+    await repo.devices();
+    mode = 'fail';
+    // A bug in our own code (not a TodylError) is NOT transient.
+    // Must fail loudly so we notice the broken integration, not serve stale silently.
+    await expect(repo.devices()).rejects.toThrow(/TypeError in parseDevice/);
+    expect(get).toHaveBeenCalledTimes(2); // Proves refresh was attempted
   });
 
   it('propagates a 5xx when there is no cache to fall back on', async () => {

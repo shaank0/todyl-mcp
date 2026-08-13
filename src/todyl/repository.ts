@@ -23,11 +23,15 @@ export function createRepository(client: TodylClient, config: TodylConfig) {
   const invoicesCache = createCache<Swept<Invoice>>(config.cacheTtlSeconds);
 
   /**
-   * Load through the cache, applying the stale rule:
-   *   5xx      → serve cached data WITH a warning, if any exists
-   *   401/403  → always fail, even with a warm cache
-   * Serving stale data on an auth error would hide a broken integration for
-   * as long as anyone kept asking questions.
+   * Load through the cache, applying the stale rule as an allowlist:
+   *   Only network/server errors (5xx, status 0) serve stale data WITH warning.
+   *   Everything else rethrows immediately: 4xx, auth, parsing errors, bugs.
+   *
+   * This is an allowlist (not a denylist) so future unknown error types fail
+   * loudly by default. A 400 (bad cursor/date) or a TypeError in our sweep/parse
+   * code must surface immediately — stale data would hide broken integrations.
+   * Serving cached data on a 401/403 would silently un-break the integration
+   * for as long as the cache stays warm.
    */
   async function load<T>(
     cache: ReturnType<typeof createCache<Swept<T>>>,
@@ -38,13 +42,17 @@ export function createRepository(client: TodylClient, config: TodylConfig) {
       const { value } = await cache.get(key, fetcher);
       return { items: value.items, truncated: value.truncated };
     } catch (err) {
-      const status = err instanceof TodylError ? err.status : 0;
-      if (status === 401 || status === 403) throw err;
+      // Allowlist: only TodylError with 5xx or network (0) falls through to stale-tolerance.
+      const isStaleTolerable =
+        err instanceof TodylError && (err.status >= 500 || err.status === 0);
+
+      if (!isStaleTolerable) throw err;
 
       const stale = cache.peek(key);
       if (!stale) throw err;
 
       const detail = err instanceof Error ? err.message : String(err);
+      const status = err instanceof TodylError ? err.status : 0;
       return {
         items: stale.value.items,
         truncated: stale.value.truncated,
