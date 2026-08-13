@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { applyDeviceFilters, projectDevice, type DeviceFilters } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
-import { ambiguousTenantError, ok, toolError, warningFor, type TodylTool } from './result.js';
+import type { TenantRef } from '../todyl/types.js';
+import { ok, resolveTenantOrClash, toolError, warningFor, type TodylTool } from './result.js';
 
 const FILTER_SHAPE = {
   tenant: z.string().optional().describe('Tenant name (case-insensitive) or exact tenant id.'),
@@ -34,8 +35,13 @@ export const listDevicesTool: TodylTool = {
     const dataset = await repo.devices();
 
     if (filters.tenant) {
-      const clash = ambiguousTenantError(dataset.items, filters.tenant, (d) => d.tenant);
+      const candidates = dataset.items.map((d) => d.tenant).filter((t): t is TenantRef => Boolean(t));
+      const { ref, clash } = resolveTenantOrClash(candidates, filters.tenant);
       if (clash) return clash;
+      // Filter by the RESOLVED id, never by re-matching the raw search string —
+      // an unrelated tenant whose opaque id happens to equal the search string
+      // must not be folded into this client's device list.
+      if (ref) filters.tenant = ref.id;
     }
 
     const matched = applyDeviceFilters(dataset.items, filters);

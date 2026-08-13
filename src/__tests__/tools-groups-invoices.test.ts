@@ -62,7 +62,11 @@ describe('list-deployment-groups', () => {
     expect(out.warning).not.toMatch(/not all devices/i);
   });
 
-  it('resolves a name cleanly even when an unrelated tenant\'s id equals it (fix round 2)', async () => {
+  it('does not refuse, and does not leak an unrelated tenant\'s group, when that tenant\'s id equals the search string (fix round 2+3)', async () => {
+    // Round 3: the ambiguity check alone resolving cleanly isn't enough — the
+    // FILTER step must also key off the resolved id, or Randoco's group (whose
+    // id is literally "Acme") merges into Acme's list. Assert both no-refusal
+    // AND that Randoco's group/id is absent.
     const collision = [
       { id: 'g1', name: 'Default', tenant: { id: 't1', name: 'Acme' }, device_count: 10 },
       { id: 'g2', name: 'Unrelated', tenant: { id: 'Acme', name: 'Randoco' }, device_count: 1 },
@@ -70,6 +74,12 @@ describe('list-deployment-groups', () => {
     const r = { deploymentGroups: async () => ({ items: collision, truncated: false }) } as unknown as TodylRepository;
     const result = await listDeploymentGroupsTool.execute({ tenant: 'Acme' }, r);
     expect(result.isError).toBeFalsy();
+    const out = payload(result);
+    expect(out.matched).toBe(1);
+    expect(out.groups.map((g: { id: string }) => g.id)).toEqual(['g1']);
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain('Randoco');
+    expect(serialized).not.toContain('"g2"');
   });
 });
 
@@ -195,7 +205,10 @@ describe('list-invoices', () => {
     expect(out.warning).not.toMatch(/not all devices/i);
   });
 
-  it('resolves a name cleanly even when an unrelated tenant\'s id equals it (fix round 2)', async () => {
+  it('does not refuse, and does not leak an unrelated tenant\'s invoice, when that tenant\'s id equals the search string (fix round 2+3)', async () => {
+    // The worst-case version of this bug for a billing tool: an unrelated
+    // client's invoice presented as part of Acme's bill. Round 3 requires the
+    // filter step (not just the ambiguity check) to key off the resolved id.
     const collision = [
       { id: 'inv1', status: 'paid', subtotal: 100, currency: 'USD', tenant: { id: 't1', name: 'Acme' } },
       { id: 'inv2', status: 'paid', subtotal: 200, currency: 'USD', tenant: { id: 'Acme', name: 'Randoco' } },
@@ -203,5 +216,11 @@ describe('list-invoices', () => {
     const r = { invoices: async () => ({ items: collision, truncated: false }) } as unknown as TodylRepository;
     const result = await listInvoicesTool.execute({ tenant: 'Acme' }, r);
     expect(result.isError).toBeFalsy();
+    const out = payload(result);
+    expect(out.matched).toBe(1);
+    expect(out.invoices.map((i: { id: string }) => i.id)).toEqual(['inv1']);
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain('Randoco');
+    expect(serialized).not.toContain('inv2');
   });
 });

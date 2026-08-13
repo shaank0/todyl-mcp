@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { matchesTenant } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
 import type { TenantRef } from '../todyl/types.js';
-import { ambiguousTenantErrorMultiRef, ok, toolError, warningFor, type TodylTool } from './result.js';
+import { ok, resolveTenantOrClash, toolError, warningFor, type TodylTool } from './result.js';
 
 const MONTH = /^\d{4}-\d{2}$/;
 
@@ -104,12 +104,19 @@ export const listInvoicesTool: TodylTool = {
 
     const dataset = await repo.invoices(start, end);
 
+    let resolvedId: string | undefined;
     if (tenant) {
-      const clash = ambiguousTenantErrorMultiRef(dataset.items, tenant, (inv) => invoiceTenantRefs(inv));
+      const candidates = dataset.items.flatMap((inv) => invoiceTenantRefs(inv));
+      const { ref, clash } = resolveTenantOrClash(candidates, tenant);
       if (clash) return clash;
+      resolvedId = ref?.id;
     }
 
-    const invoices = tenant ? filterInvoicesForTenant(dataset.items, tenant) : dataset.items;
+    // Filter (and mark covers_multiple_tenants) by the RESOLVED id, never by
+    // re-matching the raw search string — an unrelated tenant whose opaque id
+    // happens to equal the search string must not be folded into this client's
+    // invoice list.
+    const invoices = tenant ? filterInvoicesForTenant(dataset.items, resolvedId ?? tenant) : dataset.items;
 
     return ok({
       window: { start_date: start ?? 'current month', end_date: end ?? 'current month' },

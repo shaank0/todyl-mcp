@@ -114,11 +114,13 @@ describe('list-devices', () => {
     expect(out.warning).toMatch(/503/);
   });
 
-  it('resolves a name cleanly even when an unrelated tenant\'s id equals it (fix round 2)', async () => {
+  it('does not refuse, and does not leak an unrelated tenant\'s device, when that tenant\'s id equals the search string (fix round 2+3)', async () => {
     // 'Acme' is a clean, unique NAME match. Unrelated to Acme, "Randoco"'s tenant
-    // happens to carry the literal id "Acme". A flat id-or-name match would treat
-    // this as a second candidate and refuse a legitimate query — the shared
-    // resolveTenantMatches resolver (name-first, id-fallback) must not.
+    // happens to carry the literal id "Acme". Round 2 fixed the ambiguity check
+    // (no refusal); round 3 fixes the FILTER, which — until this fix — still
+    // matched the raw string and returned BOTH tenants' devices merged into one
+    // list. That's a cross-client leak in a security-vendor tool: assert not
+    // just "no refusal" but that Randoco's device and tenant id are absent.
     const collision = [
       { id: 'x', name: 'A', tenant: { id: 't1', name: 'Acme' } },
       { id: 'y', name: 'B', tenant: { id: 'Acme', name: 'Randoco' } },
@@ -126,6 +128,12 @@ describe('list-devices', () => {
     const r = { devices: async () => ({ items: collision, truncated: false }) } as unknown as TodylRepository;
     const result = await listDevicesTool.execute({ tenant: 'Acme' }, r);
     expect(result.isError).toBeFalsy();
+    const out = payload(result);
+    expect(out.matched).toBe(1);
+    expect(out.devices.map((d: { name: string }) => d.name)).toEqual(['A']);
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain('Randoco');
+    expect(serialized).not.toContain('"y"');
   });
 });
 

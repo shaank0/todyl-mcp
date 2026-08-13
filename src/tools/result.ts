@@ -79,6 +79,41 @@ export function ambiguousTenantError<T>(
 }
 
 /**
+ * Resolve a tenant search string against a candidate ref set exactly ONCE —
+ * the shared "resolve, then filter by the resolved id" step every tool that
+ * accepts a `tenant` string must use for its FILTER, not just its ambiguity
+ * check (fix-round-3 ruling: resolving cleanly at the ambiguity step but then
+ * re-matching the raw string in the filter step lets an unrelated tenant whose
+ * opaque id equals the search string slip back in and merge into the result —
+ * exactly the cross-client leak `distinctTenantsMatching`'s ambiguity check
+ * exists to prevent).
+ *
+ * Returns:
+ *  - `{}` when nothing matches — not a new error condition; callers should
+ *    filter to nothing exactly as before (resolving no candidates means the
+ *    raw-string filter would also have matched nothing).
+ *  - `{ clash }` when more than one distinct tenant matches — return this
+ *    directly.
+ *  - `{ ref }` on a clean, unambiguous resolution — filter by `ref.id`, never
+ *    by the original search string.
+ */
+export function resolveTenantOrClash(
+  refs: TenantRef[],
+  tenant: string
+): { ref?: TenantRef; clash?: ToolResult } {
+  const matches = resolveTenantMatches(refs, tenant);
+  if (matches.length === 0) return {};
+  if (matches.length > 1) {
+    return {
+      clash:
+        ambiguousTenantErrorMultiRef(matches, tenant, (ref) => [ref]) ??
+        toolError(`More than one tenant matches "${tenant}".`),
+    };
+  }
+  return { ref: matches[0] };
+}
+
+/**
  * Combine the sweep-truncation and cache-staleness warnings into one field.
  *
  * `noun` names what was being read (plural — "devices", "deployment groups",

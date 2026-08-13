@@ -343,4 +343,29 @@ describe('tenant-report', () => {
     expect(out.posture).toEqual({ devices: 0, stale: 0, needs_reboot: 0, tamper_protection_off: 0, agent_outdated: 0 });
     expect(out.invoices).toHaveLength(1);
   });
+
+  it('a not-found answer says the search was incomplete when a dataset that might have held the tenant failed to load (fix round 3)', async () => {
+    // Devices 403s. If "Ghost Co" only exists in devices (e.g. an endpoint-only
+    // client with no groups/invoices yet), a plain "no tenant matches" would
+    // state as fact something we never actually checked — the dataset that
+    // would have contained it never loaded.
+    const devicesDown = {
+      devices: async () => { throw new TodylError('forbidden', 403); },
+      deploymentGroups: async () => ({ items: GROUPS, truncated: false }),
+      invoices: async () => ({ items: INVOICES, truncated: false }),
+    } as unknown as TodylRepository;
+
+    const result = await tenantReportTool.execute({ tenant: 'Ghost Co' }, devicesDown);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/incomplete/i);
+    expect(result.content[0].text).toMatch(/devices/);
+    expect(result.content[0].text).not.toMatch(/deployment groups/);
+    expect(result.content[0].text).not.toMatch(/invoices could not be read/);
+  });
+
+  it('a not-found answer omits the incomplete note when every dataset loaded', async () => {
+    const result = await tenantReportTool.execute({ tenant: 'Ghost Co' }, repo());
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).not.toMatch(/incomplete/i);
+  });
 });
