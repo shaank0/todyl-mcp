@@ -9,7 +9,8 @@ export const listDeploymentGroupsTool: TodylTool = {
   title: 'List Todyl deployment groups',
   description:
     'List Todyl deployment groups (licensing groups) with their bundle, enabled products, device count and ' +
-    'tenant. Enrollment credentials are never returned — get a deploy key from the Todyl portal if you need one.',
+    'tenant. Enrollment credentials are never returned — get a deploy key from the Todyl portal if you need one. ' +
+    'An unrecognized "tenant" is an error naming the known tenants, not an empty result.',
   inputSchema: {
     tenant: z.string().optional().describe('Restrict to one tenant, by name (case-insensitive) or exact id.'),
   },

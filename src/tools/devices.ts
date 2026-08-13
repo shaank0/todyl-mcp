@@ -27,7 +27,8 @@ export const listDevicesTool: TodylTool = {
     'List devices across all Todyl tenants with security-posture filters. Returns a compact row per device ' +
     '(name, tenant, OS, agent version, posture flags, last check-in) plus how many matched out of the total. ' +
     'Use this for questions like "which machines have not checked in for 30 days", "which are behind on agent ' +
-    'version", or "which have tamper protection off". For the full record of one device, use get-device.',
+    'version", or "which have tamper protection off". For the full record of one device, use get-device. ' +
+    'An unrecognized "tenant" is an error naming the known tenants, not an empty result.',
   inputSchema: FILTER_SHAPE,
   readOnly: true,
   async execute(args, repo: TodylRepository) {

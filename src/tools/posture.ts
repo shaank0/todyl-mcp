@@ -31,7 +31,8 @@ export const devicePostureSummaryTool: TodylTool = {
     'Roll up Todyl device security posture: how many devices are stale (no recent check-in), need a reboot, ' +
     'have tamper protection off, or are behind on agent version — in total and broken down per tenant. ' +
     'Use this to answer "how are we doing" or to see which clients need attention. ' +
-    'The per-tenant breakdown also serves as the list of tenants and their device counts.',
+    'The per-tenant breakdown also serves as the list of tenants and their device counts. ' +
+    'An unrecognized "tenant" is an error naming the known tenants, not an empty result.',
   inputSchema: {
     tenant: z.string().optional().describe('Restrict to one tenant, by name (case-insensitive) or exact id.'),
     stale_days: z.number().int().nonnegative().optional()

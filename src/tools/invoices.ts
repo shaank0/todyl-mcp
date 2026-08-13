@@ -75,7 +75,8 @@ export const listInvoicesTool: TodylTool = {
     'subtotal, currency and the tenant (plus subtenants) each invoice covers. When filtering by tenant, ' +
     'invoices matching via the primary tenant are returned without flags. If a match comes via a subtenant, ' +
     'the invoice is marked `covers_multiple_tenants: true` because its subtotal spans the parent tenant and ' +
-    'all its subtenants—not the subtenant alone.',
+    'all its subtenants—not the subtenant alone. An unrecognized "tenant" is an error naming the known ' +
+    'tenants, not an empty result.',
   inputSchema: {
     start_date: z.string().optional().describe('First month of the window, YYYY-MM. At most 12 months ago.'),
     end_date: z.string().optional().describe('Last month of the window, YYYY-MM. Must not be before start_date.'),
