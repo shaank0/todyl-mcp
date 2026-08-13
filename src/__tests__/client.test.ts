@@ -135,4 +135,39 @@ describe('createClient', () => {
     expect(err.message).toMatch(/DNS lookup failed/);
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
+
+  it('interleaving: reject then 5xx throws 5xx error with exactly 2 calls', async () => {
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValueOnce(respond(503, { error: { code: 'unavailable' } }));
+    const client = createClient(config, fetchFn as never);
+    const err = await client.get('/v1/devices').catch((e) => e as TodylError);
+    expect(err.status).toBe(503);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('interleaving: 5xx then reject throws status 0 with exactly 2 calls', async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(respond(500, { error: { code: 'server_error' } }))
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const client = createClient(config, fetchFn as never);
+    const err = await client.get('/v1/devices').catch((e) => e as TodylError);
+    expect(err).toBeInstanceOf(TodylError);
+    expect(err.status).toBe(0);
+    expect(err.message).toMatch(/ECONNREFUSED/);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('interleaving: 5xx then 5xx throws 5xx error with exactly 2 calls', async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(respond(500, { error: { code: 'server_error' } }))
+      .mockResolvedValueOnce(respond(503, { error: { code: 'unavailable' } }));
+    const client = createClient(config, fetchFn as never);
+    const err = await client.get('/v1/devices').catch((e) => e as TodylError);
+    expect(err.status).toBe(503);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
 });
