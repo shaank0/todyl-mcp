@@ -1,9 +1,76 @@
 import { z } from 'zod';
 import { agentOutdated, isStale, matchesTenant, needsReboot, tamperOff } from '../filters.js';
-import type { TodylRepository } from '../todyl/repository.js';
-import type { TenantRef } from '../todyl/types.js';
+import { TodylError } from '../todyl/errors.js';
+import type { Dataset, TodylRepository } from '../todyl/repository.js';
+import type { DeploymentGroup, Device, Invoice, TenantRef } from '../todyl/types.js';
 import { allTenantRefsMatching, filterInvoicesForTenant } from './invoices.js';
-import { ambiguousTenantError, ambiguousTenantErrorMultiRef, ok, toolError, warningFor, type TodylTool } from './result.js';
+import { ambiguousTenantErrorMultiRef, ok, toolError, warningFor, type TodylTool } from './result.js';
+
+/** One dataset's outcome: either its usual `Dataset<T>`, or the error that stopped it. */
+type SectionResult<T> =
+  | { ok: true; dataset: Dataset<T> }
+  | { ok: false; error: { status: number; message: string } };
+
+/**
+ * Fetch one dataset, converting a thrown error into a section-local failure
+ * instead of letting it abort the whole report. A 403 on invoices (e.g. a
+ * token whose ACL lacks billing:read) must not also discard devices and
+ * groups that succeeded — see the fix-round-1 ruling. This does NOT relax
+ * the repository's own "never mask a config error with stale data" rule:
+ * `repo.devices()` etc. still only swallow 5xx/network errors internally
+ * (see repository.ts's `load`); anything that reaches here (4xx, auth,
+ * parsing) is a real failure that must be reported, not hidden.
+ */
+async function loadSection<T>(fetcher: () => Promise<Dataset<T>>): Promise<SectionResult<T>> {
+  try {
+    return { ok: true, dataset: await fetcher() };
+  } catch (err) {
+    const status = err instanceof TodylError ? err.status : 0;
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: { status, message } };
+  }
+}
+
+/** Shape of a failed section as it appears in the tool payload — never an empty array. */
+function sectionError(datasetLabel: string, error: { status: number; message: string }) {
+  return {
+    error: true as const,
+    dataset: datasetLabel,
+    status: error.status || undefined,
+    message: error.message,
+  };
+}
+
+/**
+ * Resolve which tenant(s) a search string identifies, from the union of ALL
+ * tenant refs seen across every dataset that succeeded (deduped by id) —
+ * not from devices alone, so a tenant with billing but no enrolled endpoints
+ * is still resolvable.
+ *
+ * Exact NAME matches are tried first; id matches are only consulted as a
+ * fallback when no name matches exist. A human types a company NAME; an id
+ * is only ever pasted in deliberately to disambiguate. Without this
+ * precedence, an unrelated tenant whose opaque id happens to equal the
+ * search string would compete with a clean, unique name match and force a
+ * spurious refusal — exactly the over-refusal the fix-round-1 ruling called
+ * out. Because both passes still delegate to the same `matchesTenant` rule
+ * used everywhere else, a genuine ambiguity (two tenants sharing a NAME, or
+ * two sharing an id) is still caught.
+ */
+function resolveTenantMatches(allRefs: TenantRef[], tenant: string): TenantRef[] {
+  const needle = tenant.trim().toLowerCase();
+  const byName = new Map<string, TenantRef>();
+  for (const ref of allRefs) {
+    if ((ref.name ?? '').toLowerCase() === needle) byName.set(ref.id, ref);
+  }
+  if (byName.size > 0) return [...byName.values()];
+
+  const byId = new Map<string, TenantRef>();
+  for (const ref of allRefs) {
+    if (ref.id === tenant.trim()) byId.set(ref.id, ref);
+  }
+  return [...byId.values()];
+}
 
 export const tenantReportTool: TodylTool = {
   name: 'tenant-report',
@@ -11,7 +78,10 @@ export const tenantReportTool: TodylTool = {
   description:
     'Everything Todyl knows about one client in a single call: device count and security posture, deployment ' +
     'groups with their products, and recent invoices. Intended for a QBR or a client summary — use this ' +
-    'instead of calling the individual list tools three times.',
+    'instead of calling the individual list tools three times. If Todyl refuses one of the three underlying ' +
+    'reads (e.g. an API token missing billing access), the other two are still returned, and the failed ' +
+    'section is marked with an explicit error rather than an empty list — check `incomplete` before treating ' +
+    'any zero as a real count.',
   inputSchema: {
     tenant: z.string().describe('Tenant name (case-insensitive) or exact tenant id.'),
     stale_days: z.number().int().nonnegative().optional()
@@ -26,74 +96,99 @@ export const tenantReportTool: TodylTool = {
     };
     const now = new Date();
 
-    // Fetch all three datasets up front: a client can have invoices or a deployment
-    // group with zero devices, and deciding "unknown tenant" from devices alone
-    // would misreport that client as not found.
-    const [devices, groups, invoices] = await Promise.all([
-      repo.devices(),
-      repo.deploymentGroups(),
-      repo.invoices(start, end),
+    // Each dataset fails or succeeds independently — see loadSection.
+    const [devicesResult, groupsResult, invoicesResult] = await Promise.all([
+      loadSection<Device>(() => repo.devices()),
+      loadSection<DeploymentGroup>(() => repo.deploymentGroups()),
+      loadSection<Invoice>(() => repo.invoices(start, end)),
     ]);
 
-    // Ambiguity checks per dataset, each using that dataset's own matching rule —
-    // invoices must use the primary-tenant-or-subtenant picker so a name that's
-    // unambiguous among devices but clashes via an invoice subtenant is still caught.
-    const deviceClash = ambiguousTenantError(devices.items, tenant, (d) => d.tenant);
-    if (deviceClash) return deviceClash;
-    const groupClash = ambiguousTenantError(groups.items, tenant, (g) => g.tenant);
-    if (groupClash) return groupClash;
-    const invoiceClash = ambiguousTenantErrorMultiRef(invoices.items, tenant, (inv) =>
-      allTenantRefsMatching(inv, tenant)
-    );
-    if (invoiceClash) return invoiceClash;
+    if (!devicesResult.ok && !groupsResult.ok && !invoicesResult.ok) {
+      const parts = [
+        `devices (${devicesResult.error.status || 'error'}: ${devicesResult.error.message})`,
+        `deployment groups (${groupsResult.error.status || 'error'}: ${groupsResult.error.message})`,
+        `invoices (${invoicesResult.error.status || 'error'}: ${invoicesResult.error.message})`,
+      ];
+      return toolError(`Todyl could not be reached for any dataset — ${parts.join('; ')}`);
+    }
 
-    const mineDevices = devices.items.filter((d) => matchesTenant(d.tenant, tenant));
-    const mineGroups = groups.items.filter((g) => matchesTenant(g.tenant, tenant));
-    // Reuses list-invoices' own matching + covers_multiple_tenants marking so the
-    // same question ("what does client X owe") gets the same answer either way.
-    const mineInvoices = filterInvoicesForTenant(invoices.items, tenant);
-
-    if (mineDevices.length === 0 && mineGroups.length === 0 && mineInvoices.length === 0) {
-      const known = new Set<string>();
-      const collect = (ref: TenantRef | undefined) => {
-        if (ref?.name) known.add(ref.name);
-      };
-      for (const d of devices.items) collect(d.tenant);
-      for (const g of groups.items) collect(g.tenant);
-      for (const i of invoices.items) {
-        collect(i.tenant);
-        for (const st of i.subtenants ?? []) collect(st);
+    // Build the tenant namespace from every dataset that succeeded, and resolve
+    // identity exactly once against it (see resolveTenantMatches).
+    const allRefs = new Map<string, TenantRef>();
+    const note = (ref: TenantRef | undefined) => {
+      if (ref?.id) allRefs.set(ref.id, ref);
+    };
+    if (devicesResult.ok) for (const d of devicesResult.dataset.items) note(d.tenant);
+    if (groupsResult.ok) for (const g of groupsResult.dataset.items) note(g.tenant);
+    if (invoicesResult.ok) {
+      for (const i of invoicesResult.dataset.items) {
+        note(i.tenant);
+        for (const st of i.subtenants ?? []) note(st);
       }
+    }
+
+    const matches = resolveTenantMatches([...allRefs.values()], tenant);
+
+    if (matches.length === 0) {
+      const known = [...new Set([...allRefs.values()].map((r) => r.name).filter(Boolean))].sort();
       return toolError(
-        `No Todyl tenant matches "${tenant}". Known tenants: ${[...known].sort().join(', ') || '(none)'}.`
+        `No Todyl tenant matches "${tenant}". Known tenants: ${known.join(', ') || '(none)'}.`
+      );
+    }
+    if (matches.length > 1) {
+      // Reuses the existing ambiguity-message formatting rather than a new copy.
+      // matchesTenant always re-confirms each of `matches` (they were selected by
+      // name-or-id equality already), so this is guaranteed to return an error —
+      // the fallback exists only to keep the return type sound for TypeScript.
+      return (
+        ambiguousTenantErrorMultiRef(matches, tenant, (ref) => [ref]) ??
+        toolError(`More than one tenant matches "${tenant}".`)
       );
     }
 
-    const tenantRef: TenantRef | undefined =
-      mineDevices[0]?.tenant ?? mineGroups[0]?.tenant ?? mineInvoices[0]?.tenant;
+    const tenantRef = matches[0];
 
-    // Surface truncation/staleness per dataset — a device sweep that hit the page cap
-    // is a different problem from an incomplete invoice window, and each warning
-    // names which one it is (via warningFor's noun) rather than always saying "devices".
+    // From here on, every dataset is filtered by the RESOLVED id, not by
+    // re-matching the user's original string — the string was interpreted once.
+    const posture = devicesResult.ok
+      ? (() => {
+          const mine = devicesResult.dataset.items.filter((d) => matchesTenant(d.tenant, tenantRef.id));
+          return {
+            devices: mine.length,
+            stale: mine.filter((d) => isStale(d, staleDays, now)).length,
+            needs_reboot: mine.filter((d) => needsReboot(d, now)).length,
+            tamper_protection_off: mine.filter(tamperOff).length,
+            agent_outdated: mine.filter(agentOutdated).length,
+          };
+        })()
+      : sectionError('devices', devicesResult.error);
+
+    const deploymentGroups = groupsResult.ok
+      ? groupsResult.dataset.items.filter((g) => matchesTenant(g.tenant, tenantRef.id))
+      : sectionError('deployment groups', groupsResult.error);
+
+    // Reuses list-invoices' own matching + covers_multiple_tenants marking (now
+    // keyed on the resolved id) so the same question gets the same answer either way.
+    const invoicesSection = invoicesResult.ok
+      ? filterInvoicesForTenant(invoicesResult.dataset.items, tenantRef.id)
+      : sectionError('invoices', invoicesResult.error);
+
     const warnings = [
-      warningFor(devices, 'devices'),
-      warningFor(groups, 'deployment groups'),
-      warningFor(invoices, 'invoices'),
+      devicesResult.ok ? warningFor(devicesResult.dataset, 'devices') : undefined,
+      groupsResult.ok ? warningFor(groupsResult.dataset, 'deployment groups') : undefined,
+      invoicesResult.ok ? warningFor(invoicesResult.dataset, 'invoices') : undefined,
     ].filter((w): w is string => Boolean(w));
 
+    const incomplete = !devicesResult.ok || !groupsResult.ok || !invoicesResult.ok;
+
     return ok({
-      tenant: tenantRef?.name ?? tenant,
-      tenant_id: tenantRef?.id,
+      tenant: tenantRef.name ?? tenant,
+      tenant_id: tenantRef.id,
+      incomplete,
       stale_days: staleDays,
-      posture: {
-        devices: mineDevices.length,
-        stale: mineDevices.filter((d) => isStale(d, staleDays, now)).length,
-        needs_reboot: mineDevices.filter((d) => needsReboot(d, now)).length,
-        tamper_protection_off: mineDevices.filter(tamperOff).length,
-        agent_outdated: mineDevices.filter(agentOutdated).length,
-      },
-      deployment_groups: mineGroups,
-      invoices: mineInvoices,
+      posture,
+      deployment_groups: deploymentGroups,
+      invoices: invoicesSection,
       ...(warnings.length ? { warning: warnings.join(' ') } : {}),
     });
   },

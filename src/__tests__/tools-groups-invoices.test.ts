@@ -52,6 +52,15 @@ describe('list-deployment-groups', () => {
     expect(result.content[0].text).toMatch(/t1/);
     expect(result.content[0].text).toMatch(/t2/);
   });
+
+  it('names "deployment groups" (not "devices") in its own truncation warning', async () => {
+    const r = {
+      deploymentGroups: async () => ({ items: GROUPS, truncated: true }),
+    } as unknown as TodylRepository;
+    const out = payload(await listDeploymentGroupsTool.execute({}, r));
+    expect(out.warning).toMatch(/not all deployment groups were read/i);
+    expect(out.warning).not.toMatch(/not all devices/i);
+  });
 });
 
 describe('list-invoices', () => {
@@ -167,5 +176,12 @@ describe('list-invoices', () => {
     expect(result.content[0].text).toMatch(/matches.*\\"Acme/);
     expect(result.content[0].text).toMatch(/t1/);
     expect(result.content[0].text).toMatch(/t3/);
+  });
+
+  it('names "invoices" (not "devices") in its own truncation warning', async () => {
+    const r = { invoices: async () => ({ items: INVOICES, truncated: true }) } as unknown as TodylRepository;
+    const out = payload(await listInvoicesTool.execute({}, r));
+    expect(out.warning).toMatch(/not all invoices were read/i);
+    expect(out.warning).not.toMatch(/not all devices/i);
   });
 });
