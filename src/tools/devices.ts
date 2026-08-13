@@ -84,7 +84,7 @@ export const getDeviceTool: TodylTool = {
       const candidates = matches
         .map((d) => `${d.name ?? '(unnamed)'} [id ${d.id}, tenant ${d.tenant?.name ?? 'unknown'}]`)
         .join('; ');
-      return toolError(`More than one device matches — pass the id instead. Candidates: ${candidates}`);
+      return toolError(`More than one device matches "${identifier}" — pass the id instead. Candidates: ${candidates}`);
     }
 
     return ok({

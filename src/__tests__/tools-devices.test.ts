@@ -92,6 +92,7 @@ describe('list-devices', () => {
     const r = { devices: async () => ({ items: clash, truncated: false }) } as unknown as TodylRepository;
     const result = await listDevicesTool.execute({ tenant: 'Smith & Co' }, r);
     expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/matches.*\\"Smith & Co/);
     expect(result.content[0].text).toMatch(/t1/);
     expect(result.content[0].text).toMatch(/t9/);
   });
@@ -134,6 +135,7 @@ describe('get-device', () => {
     const r = { devices: async () => ({ items: dupes, truncated: false }) } as unknown as TodylRepository;
     const result = await getDeviceTool.execute({ identifier: 'shared' }, r);
     expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/matches.*\\"shared/);
     expect(result.content[0].text).toMatch(/x1/);
     expect(result.content[0].text).toMatch(/x2/);
   });

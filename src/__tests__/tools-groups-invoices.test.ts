@@ -48,6 +48,7 @@ describe('list-deployment-groups', () => {
     const r = { deploymentGroups: async () => ({ items: clash, truncated: false }) } as unknown as TodylRepository;
     const result = await listDeploymentGroupsTool.execute({ tenant: 'Shared' }, r);
     expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/matches.*\\"Shared/);
     expect(result.content[0].text).toMatch(/t1/);
     expect(result.content[0].text).toMatch(/t2/);
   });
@@ -163,6 +164,7 @@ describe('list-invoices', () => {
     const r = { invoices: async () => ({ items: clash, truncated: false }) } as unknown as TodylRepository;
     const result = await listInvoicesTool.execute({ tenant: 'Acme' }, r);
     expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/matches.*\\"Acme/);
     expect(result.content[0].text).toMatch(/t1/);
     expect(result.content[0].text).toMatch(/t3/);
   });
