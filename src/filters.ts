@@ -35,6 +35,22 @@ export function matchesTenant(ref: TenantRef | undefined, needle: string): boole
 }
 
 /**
+ * Strict identity against an ALREADY-RESOLVED tenant id — the only comparison a
+ * post-resolution filter may use.
+ *
+ * `matchesTenant` is a symmetric id-OR-name check, which is right for
+ * interpreting a human's search string but wrong for filtering by a resolved
+ * id: feeding a resolved id back through it would still match any OTHER tenant
+ * whose *name* happened to equal that id, re-opening the cross-client merge by
+ * the mirror image of the route this whole resolve-then-filter design closes.
+ * Once the caller's string has been interpreted exactly once, only `id === id`
+ * may decide which records belong to that tenant.
+ */
+export function isTenantId(ref: TenantRef | undefined, tenantId: string): boolean {
+  return ref?.id === tenantId;
+}
+
+/**
  * Resolve which tenant(s) in a candidate set match a search string, preferring
  * exact NAME matches and falling back to id equality only when no name matches
  * exist. Todyl tenant ids are opaque 28-character strings; a human types a
@@ -95,7 +111,14 @@ export function distinctTenantsMatching<T>(
 }
 
 export interface DeviceFilters {
+  /**
+   * A RAW, un-interpreted search string (id or name). Tools must NOT pass this
+   * — they resolve the caller's string once against the full candidate set and
+   * pass `tenant_id` instead. Kept for direct/unit use of this function.
+   */
   tenant?: string;
+  /** An already-resolved tenant id, compared strictly (see `isTenantId`). */
+  tenant_id?: string;
   search?: string;
   stale_days?: number;
   needs_reboot?: boolean;
@@ -115,6 +138,7 @@ export function applyDeviceFilters(
   now: Date = new Date()
 ): Device[] {
   return devices.filter((d) => {
+    if (filters.tenant_id && !isTenantId(d.tenant, filters.tenant_id)) return false;
     if (filters.tenant && !matchesTenant(d.tenant, filters.tenant)) return false;
 
     if (filters.search) {

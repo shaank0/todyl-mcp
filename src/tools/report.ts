@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import { agentOutdated, isStale, matchesTenant, needsReboot, tamperOff } from '../filters.js';
+import { agentOutdated, isStale, isTenantId, needsReboot, tamperOff } from '../filters.js';
 import { TodylError } from '../todyl/errors.js';
 import type { Dataset, TodylRepository } from '../todyl/repository.js';
 import type { DeploymentGroup, Device, Invoice, TenantRef } from '../todyl/types.js';
-import { filterInvoicesForTenant, invoiceTenantRefs } from './invoices.js';
-import { ok, resolveTenantOrClash, toolError, warningFor, type TodylTool } from './result.js';
+import { filterInvoicesForTenantId, invoiceTenantRefs } from './invoices.js';
+import { ok, resolveTenantOrProblem, toolError, warningFor, type TodylTool } from './result.js';
 
 /** One dataset's outcome: either its usual `Dataset<T>`, or the error that stopped it. */
 type SectionResult<T> =
@@ -95,34 +95,33 @@ export const tenantReportTool: TodylTool = {
       }
     }
 
-    const { ref: tenantRef, clash } = resolveTenantOrClash([...allRefs.values()], tenant);
-    if (clash) return clash;
+    // A dataset that failed to load might be exactly the one that would have
+    // contained this tenant (e.g. a client with only invoices, and invoices
+    // 403'd) — a bare "no match" would then be stating as fact something we
+    // never actually checked. Name what didn't load so a not-found answer
+    // doesn't read as "this client doesn't exist" when it might just mean
+    // "we couldn't check".
+    const failedDatasets = [
+      !devicesResult.ok && 'devices',
+      !groupsResult.ok && 'deployment groups',
+      !invoicesResult.ok && 'invoices',
+    ].filter((label): label is string => Boolean(label));
+    const incompleteNote = failedDatasets.length
+      ? ` This search was incomplete: ${failedDatasets.join(', ')} could not be read, so a match there would not have been found.`
+      : '';
 
-    if (!tenantRef) {
-      const known = [...new Set([...allRefs.values()].map((r) => r.name).filter(Boolean))].sort();
-      // A dataset that failed to load might be exactly the one that would have
-      // contained this tenant (e.g. a client with only invoices, and invoices
-      // 403'd) — "no match" would then be stating as fact something we never
-      // actually checked. Name what didn't load so this doesn't read as "this
-      // client doesn't exist" when it might just mean "we couldn't check".
-      const failedDatasets = [
-        !devicesResult.ok && 'devices',
-        !groupsResult.ok && 'deployment groups',
-        !invoicesResult.ok && 'invoices',
-      ].filter((label): label is string => Boolean(label));
-      const incompleteNote = failedDatasets.length
-        ? ` This search was incomplete: ${failedDatasets.join(', ')} could not be read, so a match there would not have been found.`
-        : '';
-      return toolError(
-        `No Todyl tenant matches "${tenant}". Known tenants: ${known.join(', ') || '(none)'}.${incompleteNote}`
-      );
-    }
+    const { ref: tenantRef, problem } = resolveTenantOrProblem(
+      [...allRefs.values()],
+      tenant,
+      incompleteNote
+    );
+    if (problem) return problem;
 
     // From here on, every dataset is filtered by the RESOLVED id, not by
     // re-matching the user's original string — the string was interpreted once.
     const posture = devicesResult.ok
       ? (() => {
-          const mine = devicesResult.dataset.items.filter((d) => matchesTenant(d.tenant, tenantRef.id));
+          const mine = devicesResult.dataset.items.filter((d) => isTenantId(d.tenant, tenantRef!.id));
           return {
             devices: mine.length,
             stale: mine.filter((d) => isStale(d, staleDays, now)).length,
@@ -134,13 +133,13 @@ export const tenantReportTool: TodylTool = {
       : sectionError('devices', devicesResult.error);
 
     const deploymentGroups = groupsResult.ok
-      ? groupsResult.dataset.items.filter((g) => matchesTenant(g.tenant, tenantRef.id))
+      ? groupsResult.dataset.items.filter((g) => isTenantId(g.tenant, tenantRef!.id))
       : sectionError('deployment groups', groupsResult.error);
 
     // Reuses list-invoices' own matching + covers_multiple_tenants marking (now
     // keyed on the resolved id) so the same question gets the same answer either way.
     const invoicesSection = invoicesResult.ok
-      ? filterInvoicesForTenant(invoicesResult.dataset.items, tenantRef.id)
+      ? filterInvoicesForTenantId(invoicesResult.dataset.items, tenantRef!.id)
       : sectionError('invoices', invoicesResult.error);
 
     const warnings = [
@@ -152,8 +151,8 @@ export const tenantReportTool: TodylTool = {
     const incomplete = !devicesResult.ok || !groupsResult.ok || !invoicesResult.ok;
 
     return ok({
-      tenant: tenantRef.name ?? tenant,
-      tenant_id: tenantRef.id,
+      tenant: tenantRef!.name ?? tenant,
+      tenant_id: tenantRef!.id,
       incomplete,
       stale_days: staleDays,
       posture,

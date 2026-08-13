@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { matchesTenant } from '../filters.js';
+import { isTenantId } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
 import type { TenantRef } from '../todyl/types.js';
-import { ok, resolveTenantOrClash, warningFor, type TodylTool } from './result.js';
+import { ok, resolveTenantOrProblem, warningFor, type TodylTool } from './result.js';
 
 export const listDeploymentGroupsTool: TodylTool = {
   name: 'list-deployment-groups',
@@ -18,18 +18,16 @@ export const listDeploymentGroupsTool: TodylTool = {
     const { tenant } = args as { tenant?: string };
     const dataset = await repo.deploymentGroups();
 
-    let resolvedId: string | undefined;
+    let groups = dataset.items;
     if (tenant) {
       const candidates = dataset.items.map((g) => g.tenant).filter((t): t is TenantRef => Boolean(t));
-      const { ref, clash } = resolveTenantOrClash(candidates, tenant);
-      if (clash) return clash;
-      resolvedId = ref?.id;
+      const { ref, problem } = resolveTenantOrProblem(candidates, tenant);
+      if (problem) return problem;
+      // Filter by the RESOLVED id, never by re-matching the raw search string —
+      // an unrelated tenant whose opaque id happens to equal the search string
+      // must not be folded into this client's group list.
+      groups = dataset.items.filter((g) => isTenantId(g.tenant, ref!.id));
     }
-
-    // Filter by the RESOLVED id, never by re-matching the raw search string —
-    // an unrelated tenant whose opaque id happens to equal the search string
-    // must not be folded into this client's group list.
-    const groups = tenant ? dataset.items.filter((g) => matchesTenant(g.tenant, resolvedId ?? tenant)) : dataset.items;
 
     return ok({
       matched: groups.length,

@@ -81,6 +81,14 @@ describe('list-deployment-groups', () => {
     expect(serialized).not.toContain('Randoco');
     expect(serialized).not.toContain('"g2"');
   });
+
+  it('errors, naming the known tenants, when the tenant resolves to nothing', async () => {
+    const result = await listDeploymentGroupsTool.execute({ tenant: 'Nope Ltd' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/Acme/);
+    expect(result.content[0].text).toMatch(/Beta/);
+  });
 });
 
 describe('list-invoices', () => {
@@ -147,10 +155,25 @@ describe('list-invoices', () => {
     const repo = {
       invoices: async () => ({ items: INVOICES, truncated: false }),
     } as unknown as TodylRepository;
-    const none = payload(await listInvoicesTool.execute({ tenant: 'Beta' }, repo));
-    expect(none.invoices).toHaveLength(0);
     const some = payload(await listInvoicesTool.execute({ tenant: 'Acme' }, repo));
     expect(some.invoices).toHaveLength(2);
+  });
+
+  it('errors, rather than returning an empty list, for a tenant that resolves to nothing', async () => {
+    // CHANGED BEHAVIOUR (task-11 final pass). This used to assert
+    // `invoices: []` for an unknown tenant. That empty list was produced by
+    // falling through to a raw-string filter (`resolvedId ?? tenant`) that
+    // happened to match nothing — the trapdoor that re-opens the cross-client
+    // merge the moment resolution and raw matching diverge. Resolution now has
+    // no "nothing matched, carry on" outcome, and naming the known tenants is a
+    // more useful answer for a billing question than a silent zero.
+    const repo = {
+      invoices: async () => ({ items: INVOICES, truncated: false }),
+    } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ tenant: 'Beta' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/Acme/);
   });
 
   it('filters by subtenant name and marks as covering multiple tenants', async () => {
@@ -222,5 +245,28 @@ describe('list-invoices', () => {
     const serialized = JSON.stringify(out);
     expect(serialized).not.toContain('Randoco');
     expect(serialized).not.toContain('inv2');
+  });
+
+  it('does not leak via the SUBTENANT path when an unrelated subtenant\'s id equals the search string', async () => {
+    // The subtenant rule is a second, independent way a raw-string filter can
+    // pull in another client: inv2 belongs to "Other Co", and one of its
+    // subtenants carries the literal id "Acme". Matching the raw string would
+    // attach Other Co's whole bill to Acme, marked covers_multiple_tenants —
+    // wrong money, presented as if explained.
+    const collision = [
+      { id: 'inv1', status: 'paid', subtotal: 100, currency: 'USD', tenant: { id: 't1', name: 'Acme' } },
+      { id: 'inv2', status: 'paid', subtotal: 999, currency: 'USD', tenant: { id: 't9', name: 'Other Co' },
+        subtenants: [{ id: 'Acme', name: 'Randoco' }] },
+    ];
+    const r = { invoices: async () => ({ items: collision, truncated: false }) } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ tenant: 'Acme' }, r);
+    expect(result.isError).toBeFalsy();
+    const out = payload(result);
+    expect(out.matched).toBe(1);
+    expect(out.invoices.map((i: { id: string }) => i.id)).toEqual(['inv1']);
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain('Randoco');
+    expect(serialized).not.toContain('Other Co');
+    expect(serialized).not.toContain('999');
   });
 });

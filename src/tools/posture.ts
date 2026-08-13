@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { agentOutdated, isStale, matchesTenant, needsReboot, tamperOff } from '../filters.js';
+import { agentOutdated, isStale, isTenantId, needsReboot, tamperOff } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
-import type { Device } from '../todyl/types.js';
-import { ambiguousTenantError, ok, warningFor, type TodylTool } from './result.js';
+import type { Device, TenantRef } from '../todyl/types.js';
+import { ok, resolveTenantOrProblem, warningFor, type TodylTool } from './result.js';
 
 interface Counts {
   devices: number;
@@ -34,8 +34,8 @@ export const devicePostureSummaryTool: TodylTool = {
     'The per-tenant breakdown also serves as the list of tenants and their device counts.',
   inputSchema: {
     tenant: z.string().optional().describe('Restrict to one tenant, by name (case-insensitive) or exact id.'),
-    stale_days: z.number().int().positive().optional()
-      .describe('Days without a check-in before a device counts as stale. Default 30.'),
+    stale_days: z.number().int().nonnegative().optional()
+      .describe('Days without a check-in before a device counts as stale. 0 means "stale if it missed today\'s check-in". Default 30.'),
   },
   readOnly: true,
   async execute(args, repo: TodylRepository) {
@@ -43,12 +43,17 @@ export const devicePostureSummaryTool: TodylTool = {
     const now = new Date();
     const dataset = await repo.devices();
 
+    let scoped = dataset.items;
     if (tenant) {
-      const clash = ambiguousTenantError(dataset.items, tenant, (d) => d.tenant);
-      if (clash) return clash;
+      const candidates = dataset.items.map((d) => d.tenant).filter((t): t is TenantRef => Boolean(t));
+      const { ref, problem } = resolveTenantOrProblem(candidates, tenant);
+      if (problem) return problem;
+      // Filter by the RESOLVED id, never by re-matching the raw search string.
+      // A summary is where this matters most: an unrelated tenant folded in here
+      // corrupts BOTH the per-tenant breakdown and the totals, and a wrong total
+      // has no visible cause — it just reads as a number.
+      scoped = dataset.items.filter((d) => isTenantId(d.tenant, ref!.id));
     }
-
-    const scoped = tenant ? dataset.items.filter((d) => matchesTenant(d.tenant, tenant)) : dataset.items;
 
     const totals = empty();
     const perTenant = new Map<string, Counts & { tenant: string; tenant_id: string }>();

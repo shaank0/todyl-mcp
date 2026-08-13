@@ -62,50 +62,56 @@ export function ambiguousTenantErrorMultiRef<T>(
   return toolError(ambiguityMessage(tenant, matches));
 }
 
+// NOTE: there is deliberately no single-ref `ambiguousTenantError(items, tenant,
+// pick)` helper any more. It made "check for ambiguity, then filter however you
+// like" the path of least resistance, and `device-posture-summary` took it: it
+// checked ambiguity correctly and then filtered on the RAW string, merging an
+// unrelated tenant's devices into both the per-tenant breakdown and the totals.
+// Resolution and filtering are one step now — `resolveTenantOrProblem` below.
+
 /**
- * Refuse an ambiguous tenant name rather than merging two clients' data into
- * one answer. Returns an error result to return directly, or undefined when
- * the name is unambiguous. Every tool accepting `tenant` must call this.
+ * "No such tenant" — naming the tenants we actually know about, so the caller
+ * can correct a typo instead of reading an empty result as "this client has
+ * nothing". `note` appends a caveat when the search itself was incomplete
+ * (e.g. a dataset that might have held the tenant failed to load).
  */
-export function ambiguousTenantError<T>(
-  items: T[],
-  tenant: string,
-  pick: (item: T) => TenantRef | undefined
-): ToolResult | undefined {
-  return ambiguousTenantErrorMultiRef(items, tenant, (item) => {
-    const ref = pick(item);
-    return ref ? [ref] : [];
-  });
+export function unknownTenantError(refs: TenantRef[], tenant: string, note = ''): ToolResult {
+  const known = [...new Set(refs.map((r) => r.name).filter(Boolean))].sort();
+  return toolError(
+    `No Todyl tenant matches "${tenant}". Known tenants: ${known.join(', ') || '(none)'}.${note}`
+  );
 }
 
 /**
- * Resolve a tenant search string against a candidate ref set exactly ONCE —
- * the shared "resolve, then filter by the resolved id" step every tool that
- * accepts a `tenant` string must use for its FILTER, not just its ambiguity
- * check (fix-round-3 ruling: resolving cleanly at the ambiguity step but then
- * re-matching the raw string in the filter step lets an unrelated tenant whose
- * opaque id equals the search string slip back in and merge into the result —
- * exactly the cross-client leak `distinctTenantsMatching`'s ambiguity check
- * exists to prevent).
+ * Resolve a caller-supplied tenant string to exactly ONE tenant ref, against
+ * the complete candidate set, exactly once. This is the single entry point for
+ * every tool that accepts a `tenant` argument.
  *
- * Returns:
- *  - `{}` when nothing matches — not a new error condition; callers should
- *    filter to nothing exactly as before (resolving no candidates means the
- *    raw-string filter would also have matched nothing).
- *  - `{ clash }` when more than one distinct tenant matches — return this
- *    directly.
- *  - `{ ref }` on a clean, unambiguous resolution — filter by `ref.id`, never
- *    by the original search string.
+ * Returns either `{ ref }` — resolved, and the ONLY thing a filter may key off
+ * is `ref.id` (see `isTenantId`) — or `{ problem }`, an error ToolResult to
+ * return directly. There is deliberately no third "nothing matched, carry on"
+ * outcome: an earlier design returned `{}` there and left callers writing
+ * `resolvedId ?? tenant`, which fell back to filtering by the RAW string. That
+ * was harmless only while resolution and raw matching happened to agree on the
+ * empty case, and it re-opened the cross-client merge the moment they diverged.
+ * A tenant argument that resolves to nothing is now an explicit error, which is
+ * also a more useful answer than a bare `matched: 0`.
+ *
+ * Why this must see the whole candidate set: `resolveTenantMatches`'s
+ * name-first/id-fallback precedence is a SET-level policy (see its docs).
+ * Callers collect every ref every item carries — unconditionally, unfiltered —
+ * and call this once.
  */
-export function resolveTenantOrClash(
+export function resolveTenantOrProblem(
   refs: TenantRef[],
-  tenant: string
-): { ref?: TenantRef; clash?: ToolResult } {
+  tenant: string,
+  notFoundNote = ''
+): { ref?: TenantRef; problem?: ToolResult } {
   const matches = resolveTenantMatches(refs, tenant);
-  if (matches.length === 0) return {};
+  if (matches.length === 0) return { problem: unknownTenantError(refs, tenant, notFoundNote) };
   if (matches.length > 1) {
     return {
-      clash:
+      problem:
         ambiguousTenantErrorMultiRef(matches, tenant, (ref) => [ref]) ??
         toolError(`More than one tenant matches "${tenant}".`),
     };

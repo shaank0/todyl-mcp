@@ -2,13 +2,13 @@ import { z } from 'zod';
 import { applyDeviceFilters, projectDevice, type DeviceFilters } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
 import type { TenantRef } from '../todyl/types.js';
-import { ok, resolveTenantOrClash, toolError, warningFor, type TodylTool } from './result.js';
+import { ok, resolveTenantOrProblem, toolError, warningFor, type TodylTool } from './result.js';
 
 const FILTER_SHAPE = {
   tenant: z.string().optional().describe('Tenant name (case-insensitive) or exact tenant id.'),
   search: z.string().optional().describe('Substring matched against device name, serial number and UDID.'),
-  stale_days: z.number().int().positive().optional()
-    .describe('Only devices whose last check-in is older than this many days. Devices that have never checked in are included.'),
+  stale_days: z.number().int().nonnegative().optional()
+    .describe('Only devices whose last check-in is older than this many days. 0 means "missed today\'s check-in". Devices that have never checked in are included.'),
   needs_reboot: z.boolean().optional().describe('Only devices with a reboot pending.'),
   tamper_protection: z.enum(['on', 'off']).optional()
     .describe('Filter by tamper protection. "off" also matches devices where the state is unknown.'),
@@ -31,17 +31,21 @@ export const listDevicesTool: TodylTool = {
   inputSchema: FILTER_SHAPE,
   readOnly: true,
   async execute(args, repo: TodylRepository) {
-    const { limit = 50, ...filters } = args as DeviceFilters & { limit?: number };
+    const { limit = 50, tenant, ...rest } = args as DeviceFilters & { limit?: number };
     const dataset = await repo.devices();
 
-    if (filters.tenant) {
+    // The raw string never reaches the filter: `tenant`/`tenant_id` are blanked
+    // out of whatever came in, and only a RESOLVED id is ever set below.
+    const filters: DeviceFilters = { ...rest, tenant: undefined, tenant_id: undefined };
+
+    if (tenant) {
       const candidates = dataset.items.map((d) => d.tenant).filter((t): t is TenantRef => Boolean(t));
-      const { ref, clash } = resolveTenantOrClash(candidates, filters.tenant);
-      if (clash) return clash;
+      const { ref, problem } = resolveTenantOrProblem(candidates, tenant);
+      if (problem) return problem;
       // Filter by the RESOLVED id, never by re-matching the raw search string —
       // an unrelated tenant whose opaque id happens to equal the search string
       // must not be folded into this client's device list.
-      if (ref) filters.tenant = ref.id;
+      filters.tenant_id = ref!.id;
     }
 
     const matched = applyDeviceFilters(dataset.items, filters);

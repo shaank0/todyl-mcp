@@ -1,27 +1,31 @@
 import { z } from 'zod';
-import { matchesTenant } from '../filters.js';
+import { isTenantId } from '../filters.js';
 import type { TodylRepository } from '../todyl/repository.js';
-import type { TenantRef } from '../todyl/types.js';
-import { ok, resolveTenantOrClash, toolError, warningFor, type TodylTool } from './result.js';
+import type { Invoice, TenantRef } from '../todyl/types.js';
+import { ok, resolveTenantOrProblem, toolError, warningFor, type TodylTool } from './result.js';
 
 const MONTH = /^\d{4}-\d{2}$/;
 
 type InvoiceLike = { tenant?: TenantRef; subtenants?: TenantRef[] };
 
 /**
- * Check if an invoice matches a tenant, either as primary tenant or via subtenants.
- * Returns { matched: boolean, viaTenant: boolean } to track if the match came via a subtenant.
+ * Check if an invoice belongs to an ALREADY-RESOLVED tenant id, either as primary
+ * tenant or via subtenants. Returns { matched, viaTenant } to track whether the
+ * match came via a subtenant.
  *
- * Exported because the exact "primary vs. subtenant" distinction here is what drives
- * `covers_multiple_tenants` — a report tool asking "what does client X owe" must use
- * the same rule list-invoices does, or the same question gets two different answers.
+ * Takes an id, not a search string, and compares it strictly: the caller's string
+ * is interpreted once, up front, against the whole tenant namespace (see
+ * `resolveTenantOrProblem`). Exported because the exact "primary vs. subtenant"
+ * distinction here is what drives `covers_multiple_tenants` — a report tool asking
+ * "what does client X owe" must use the same rule list-invoices does, or the same
+ * question gets two different answers.
  */
-export function invoiceMatchesTenant(
+export function invoiceMatchesTenantId(
   invoice: InvoiceLike,
-  tenant: string
+  tenantId: string
 ): { matched: boolean; viaTenant: boolean } {
-  if (matchesTenant(invoice.tenant, tenant)) return { matched: true, viaTenant: true };
-  if (invoice.subtenants?.some((st) => matchesTenant(st, tenant))) return { matched: true, viaTenant: false };
+  if (isTenantId(invoice.tenant, tenantId)) return { matched: true, viaTenant: true };
+  if (invoice.subtenants?.some((st) => isTenantId(st, tenantId))) return { matched: true, viaTenant: false };
   return { matched: false, viaTenant: false };
 }
 
@@ -42,19 +46,20 @@ export function invoiceTenantRefs(invoice: InvoiceLike): TenantRef[] {
 }
 
 /**
- * Filter a list of invoices down to those matching a tenant (by primary tenant or
- * subtenant), marking `covers_multiple_tenants: true` when the match came via a
- * subtenant — its subtotal spans the parent tenant and all its subtenants, not
- * just the one that matched. The single source of truth for this rule; reused by
- * both list-invoices and tenant-report so the same question gets the same answer.
+ * Filter a list of invoices down to those belonging to a RESOLVED tenant id (by
+ * primary tenant or subtenant), marking `covers_multiple_tenants: true` when the
+ * match came via a subtenant — its subtotal spans the parent tenant and all its
+ * subtenants, not just the one that matched. The single source of truth for this
+ * rule; reused by both list-invoices and tenant-report so the same question gets
+ * the same answer.
  */
-export function filterInvoicesForTenant<T extends InvoiceLike>(
+export function filterInvoicesForTenantId<T extends InvoiceLike>(
   items: T[],
-  tenant: string
+  tenantId: string
 ): (T & { covers_multiple_tenants?: true })[] {
   const marked: (T & { covers_multiple_tenants?: true })[] = [];
   for (const item of items) {
-    const { matched, viaTenant } = invoiceMatchesTenant(item, tenant);
+    const { matched, viaTenant } = invoiceMatchesTenantId(item, tenantId);
     if (!matched) continue;
     marked.push(viaTenant ? item : { ...item, covers_multiple_tenants: true });
   }
@@ -104,19 +109,18 @@ export const listInvoicesTool: TodylTool = {
 
     const dataset = await repo.invoices(start, end);
 
-    let resolvedId: string | undefined;
+    let invoices: (Invoice & { covers_multiple_tenants?: true })[] = dataset.items;
     if (tenant) {
       const candidates = dataset.items.flatMap((inv) => invoiceTenantRefs(inv));
-      const { ref, clash } = resolveTenantOrClash(candidates, tenant);
-      if (clash) return clash;
-      resolvedId = ref?.id;
+      const { ref, problem } = resolveTenantOrProblem(candidates, tenant);
+      if (problem) return problem;
+      // Filter (and mark covers_multiple_tenants) by the RESOLVED id, never by
+      // re-matching the raw search string — an unrelated tenant whose opaque id
+      // happens to equal the search string must not be folded into this client's
+      // invoice list. Someone else's bill inside this client's is the worst
+      // version of this bug.
+      invoices = filterInvoicesForTenantId(dataset.items, ref!.id);
     }
-
-    // Filter (and mark covers_multiple_tenants) by the RESOLVED id, never by
-    // re-matching the raw search string — an unrelated tenant whose opaque id
-    // happens to equal the search string must not be folded into this client's
-    // invoice list.
-    const invoices = tenant ? filterInvoicesForTenant(dataset.items, resolvedId ?? tenant) : dataset.items;
 
     return ok({
       window: { start_date: start ?? 'current month', end_date: end ?? 'current month' },

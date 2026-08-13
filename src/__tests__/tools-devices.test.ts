@@ -135,6 +135,24 @@ describe('list-devices', () => {
     expect(serialized).not.toContain('Randoco');
     expect(serialized).not.toContain('"y"');
   });
+
+  it('errors, naming the known tenants, when the tenant resolves to nothing', async () => {
+    // Previously this fell through to filtering by the raw string and returned
+    // `matched: 0`. That fallback (`resolvedId ?? tenant`) is the trapdoor: it
+    // only ever looked harmless because a zero-match resolve and a zero-match
+    // raw filter agreed. Resolution failing is now an answer, not a silent zero.
+    const result = await listDevicesTool.execute({ tenant: 'Nope Ltd' }, repo());
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/Acme/);
+    expect(result.content[0].text).toMatch(/Beta/);
+  });
+
+  it('accepts stale_days: 0 and rejects a negative, like every other tool', () => {
+    const schema = listDevicesTool.inputSchema.stale_days!;
+    expect(schema.safeParse(0).success).toBe(true);
+    expect(schema.safeParse(-1).success).toBe(false);
+  });
 });
 
 describe('get-device', () => {
@@ -160,6 +178,24 @@ describe('get-device', () => {
     expect(result.content[0].text).toMatch(/matches.*\\"shared/);
     expect(result.content[0].text).toMatch(/x1/);
     expect(result.content[0].text).toMatch(/x2/);
+  });
+
+  it('refuses when one device\'s NAME equals another device\'s ID, rather than picking one', async () => {
+    // get-device's identifier is matched with a flat OR across id/name/serial/udid,
+    // so the same coincidental-collision shape exists here — but one record deep
+    // rather than one tenant deep. It is closed by refusal, not by resolution:
+    // there is no "which did you mean" precedence for a device, so the tool must
+    // hand back both candidates (and, note, they belong to different clients).
+    const cross = [
+      { id: 'SHARED', name: 'Machine A', tenant: { id: 't1', name: 'Acme' } },
+      { id: 'd9', name: 'SHARED', tenant: { id: 't2', name: 'Randoco' } },
+    ] as Device[];
+    const r = { devices: async () => ({ items: cross, truncated: false }) } as unknown as TodylRepository;
+    const result = await getDeviceTool.execute({ identifier: 'SHARED' }, r);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/more than one device/i);
+    expect(result.content[0].text).toMatch(/Acme/);
+    expect(result.content[0].text).toMatch(/Randoco/);
   });
 
   it('errors clearly when nothing matches', async () => {

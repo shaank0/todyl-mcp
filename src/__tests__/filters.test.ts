@@ -4,6 +4,7 @@ import {
   applyDeviceFilters,
   distinctTenantsMatching,
   isStale,
+  isTenantId,
   needsReboot,
   projectDevice,
   resolveTenantMatches,
@@ -210,5 +211,21 @@ describe('projectDevice', () => {
     });
     expect(Object.keys(p).length).toBeLessThanOrEqual(12);
     expect((p as Record<string, unknown>).session).toBeUndefined();
+  });
+});
+
+describe('isTenantId', () => {
+  it('matches only on id identity', () => {
+    expect(isTenantId({ id: 't1', name: 'Acme' }, 't1')).toBe(true);
+    expect(isTenantId({ id: 't1', name: 'Acme' }, 't2')).toBe(false);
+    expect(isTenantId(undefined, 't1')).toBe(false);
+  });
+
+  it('never matches a tenant whose NAME equals the resolved id', () => {
+    // The mirror image of the collision this whole design closes: once a search
+    // string has been resolved to an id, feeding that id back through a
+    // symmetric id-or-name check (matchesTenant) would pull in any tenant merely
+    // NAMED that id. Only id === id may decide record ownership.
+    expect(isTenantId({ id: 't1', name: 'Acme' }, 'Acme')).toBe(false);
   });
 });

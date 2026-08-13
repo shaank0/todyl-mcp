@@ -363,6 +363,33 @@ describe('tenant-report', () => {
     expect(result.content[0].text).not.toMatch(/invoices could not be read/);
   });
 
+  it('does not merge an unrelated tenant\'s devices into the posture counts when its id equals the search string', async () => {
+    // The report's groups-side version of this is covered above; this is the
+    // devices side, where the damage is a wrong NUMBER rather than an extra row.
+    // "Randoco"'s tenant id is the literal string "Acme"; its two devices are
+    // stale and tamper-off, so a raw-string filter would report Acme as
+    // devices: 3, stale: 2 instead of devices: 1, stale: 0.
+    const collision = repo({
+      devicesOverride: {
+        items: [
+          { id: 'acme-1', tenant: { id: 't1', name: 'Acme' }, last_checkin_at: fresh,
+            tamper_protection: { enabled: true },
+            operating_system: { agent_version: '2.0', latest_available_agent_version: '2.0' } },
+          { id: 'rand-1', tenant: { id: 'Acme', name: 'Randoco' }, last_checkin_at: '2020-01-01T00:00:00Z',
+            tamper_protection: { enabled: false } },
+          { id: 'rand-2', tenant: { id: 'Acme', name: 'Randoco' }, last_checkin_at: '2020-01-01T00:00:00Z',
+            tamper_protection: { enabled: false } },
+        ] as any,
+      },
+    });
+    const out = payload(await tenantReportTool.execute({ tenant: 'Acme' }, collision));
+    expect(out.tenant_id).toBe('t1');
+    expect(out.posture).toEqual({
+      devices: 1, stale: 0, needs_reboot: 0, tamper_protection_off: 0, agent_outdated: 0,
+    });
+    expect(JSON.stringify(out)).not.toContain('Randoco');
+  });
+
   it('a not-found answer omits the incomplete note when every dataset loaded', async () => {
     const result = await tenantReportTool.execute({ tenant: 'Ghost Co' }, repo());
     expect(result.isError).toBe(true);
