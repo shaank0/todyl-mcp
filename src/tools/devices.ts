@@ -65,7 +65,8 @@ export const getDeviceTool: TodylTool = {
   },
   readOnly: true,
   async execute(args, repo: TodylRepository) {
-    const needle = String((args as { identifier: string }).identifier ?? '').trim().toLowerCase();
+    const identifier = String((args as { identifier: string }).identifier ?? '').trim();
+    const needle = identifier.toLowerCase();
     if (!needle) return toolError('identifier is required.');
 
     const dataset = await repo.devices();
@@ -75,7 +76,7 @@ export const getDeviceTool: TodylTool = {
 
     if (matches.length === 0) {
       return toolError(
-        `No device matches "${(args as { identifier: string }).identifier}" by id, name, serial number or UDID. ` +
+        `No device matches "${identifier}" by id, name, serial number or UDID. ` +
           'Use list-devices with the "search" filter for a substring match.'
       );
     }

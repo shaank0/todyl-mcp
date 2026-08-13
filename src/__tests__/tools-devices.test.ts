@@ -10,8 +10,31 @@ const DEVICES: Device[] = [
     last_checkin_at: '2020-01-01T00:00:00Z', tamper_protection: { enabled: false } },
 ];
 
+const FULL_DEVICE: Device = {
+  id: 'd3',
+  name: 'SERVER-1',
+  serial_number: 'SN-3',
+  udid: 'U-3',
+  tenant: { id: 't3', name: 'Delta' },
+  last_checkin_at: new Date().toISOString(),
+  tamper_protection: { enabled: true },
+  operating_system: { type: 'Windows', version: '11', agent_version: '2.5', latest_available_agent_version: '2.6' },
+  session: {
+    account_name: 'admin@example.com',
+    is_mfa: true,
+    connected_at: '2026-08-10T10:00:00Z',
+    pop_location: 'us-west-2',
+  },
+  deployment_group: { id: 'dg1', name: 'Production' },
+  billing_status: 'billing',
+  device_type: 'server',
+};
+
 const repo = (over: Partial<Awaited<ReturnType<TodylRepository['devices']>>> = {}) =>
   ({ devices: async () => ({ items: DEVICES, truncated: false, ...over }) }) as unknown as TodylRepository;
+
+const repoWithFull = (over: Partial<Awaited<ReturnType<TodylRepository['devices']>>> = {}) =>
+  ({ devices: async () => ({ items: [FULL_DEVICE, ...DEVICES], truncated: false, ...over }) }) as unknown as TodylRepository;
 
 const payload = (result: { content: { text: string }[] }) => JSON.parse(result.content[0].text);
 
@@ -21,6 +44,25 @@ describe('list-devices', () => {
     expect(out.matched).toBe(2);
     expect(out.total).toBe(2);
     expect(out.devices[0].session).toBeUndefined();
+  });
+
+  it('projects devices: excludes heavy fields and includes flattened fields', async () => {
+    const out = payload(await listDevicesTool.execute({}, repoWithFull()));
+    const row = out.devices[0];
+    // Heavy fields that should be stripped by projection
+    expect(row.session).toBeUndefined();
+    expect(row.deployment_group).toBeUndefined();
+    expect(row.udid).toBeUndefined();
+    expect(row.operating_system).toBeUndefined();
+    // Flattened fields that should be present
+    expect(row.id).toBe('d3');
+    expect(row.name).toBe('SERVER-1');
+    expect(row.tenant).toBe('Delta');
+    expect(row.os).toBe('Windows 11');
+    expect(row.agent_version).toBe('2.5');
+    expect(row.latest_agent_version).toBe('2.6');
+    expect(row.agent_outdated).toBe(true);
+    expect(row.tamper_protection_off).toBe(false);
   });
 
   it('applies filters', async () => {
