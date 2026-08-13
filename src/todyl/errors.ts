@@ -18,29 +18,43 @@ interface ErrorEnvelope {
 }
 
 /** Upstream text is free-form; cap it so a body dump can't ride out in an error. */
-const MAX_UPSTREAM_MESSAGE = 200;
+const MAX_UPSTREAM_TEXT = 200;
 
 /**
- * Sanitise a message string that came from Todyl before repeating it to the
- * caller. It reaches the LLM's context, the tool's `warning` field and the
- * gateway's audit log, so it is a secret boundary exactly like a success payload.
+ * Sanitise ANY upstream-controlled text before repeating it to the caller.
  *
- * `deepScrub` handles the structured case (a credentials object embedded in the
- * error envelope), but a message is free text: key-based scrubbing cannot reach
- * inside `"deploy_key=ABC123 is invalid"`. So if the text so much as mentions a
- * redacted field name, the whole message is withheld rather than echoed — the
- * status-derived guidance below is what makes these errors actionable anyway,
- * and losing a vendor sentence costs far less than leaking a live key.
+ * The invariant is not "scrub the message" — it is **no upstream-controlled
+ * text reaches a caller unscrubbed**. Stating it as a field-specific rule is
+ * what let this leak twice: the first fix covered the response *body*, and
+ * `error.message` turned out to be one of four such channels (`message`,
+ * `param`, `request_id`, and the response's `content-type`). Every one of them
+ * lands in the LLM's context, in a tool's `warning` field via `staleWarning`,
+ * and durably in the gateway's audit log. So this is a single funnel that every
+ * such value must pass through, rather than a check applied per site.
+ *
+ * Three jobs, in order:
+ *  1. Coerce. Todyl's JSON is untrusted shape as well as untrusted content —
+ *     `{"error":{"message":42}}` is well-formed JSON, and calling `.trim()` on
+ *     a number threw a TypeError *out of* this mapper, turning a clean 400 into
+ *     a status-0 section error.
+ *  2. Withhold. `deepScrub` handles structured secrets, but these are free
+ *     text and key-based scrubbing cannot reach inside `"deploy_key=ABC123"`.
+ *     If the text so much as mentions a redacted field name, the whole value is
+ *     dropped: the status-derived guidance is what makes these errors
+ *     actionable anyway, and losing a vendor sentence costs far less than
+ *     leaking a live enrollment key.
+ *  3. Cap. A 100 KB `param` is a body dump wearing a different field name.
  */
-function safeUpstreamMessage(message: string | undefined): string | undefined {
-  const text = message?.trim();
+export function safeUpstreamText(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const text = String(value).trim();
   if (!text) return undefined;
   const lowered = text.toLowerCase();
   if (REDACTED_KEYS.some((key) => lowered.includes(key))) {
-    return '(message withheld — it referenced credential fields)';
+    return '(withheld — referenced credential fields)';
   }
-  return text.length > MAX_UPSTREAM_MESSAGE
-    ? `${text.slice(0, MAX_UPSTREAM_MESSAGE)}… (truncated)`
+  return text.length > MAX_UPSTREAM_TEXT
+    ? `${text.slice(0, MAX_UPSTREAM_TEXT)}… (truncated)`
     : text;
 }
 
@@ -55,19 +69,28 @@ export function toTodylError(status: number, bodyText: string): TodylError {
     // carries enrollment secrets, they are gone before any field is read.
     //
     // Honest scope: this is defence-in-depth, NOT load-bearing today, and no
-    // test can currently distinguish its presence. The only upstream-controlled
-    // text this function echoes is `error.message`, and that is free text —
-    // key-based scrubbing cannot reach inside it, which is why
-    // `safeUpstreamMessage` exists and is what actually holds the boundary. This
-    // line matters the moment anyone echoes another envelope field; it is kept
-    // so that change is safe by default rather than requiring the author to
-    // remember. Removing it would not fail the suite — see the fix-wave report.
+    // test can currently distinguish its presence — every field this function
+    // reads is separately funnelled through `safeUpstreamText`, which is what
+    // actually holds the boundary. This line matters the moment anyone reads a
+    // field that isn't, so that change is safe by default. Removing it does not
+    // fail the suite; see the fix-wave report.
     envelope = deepScrub(JSON.parse(bodyText)) as ErrorEnvelope;
   } catch {
     // Non-JSON body; fall through with an empty envelope.
   }
-  const { code, request_id: requestId, param } = envelope.error ?? {};
-  const message = safeUpstreamMessage(envelope.error?.message);
+
+  // EVERY upstream-controlled field this function echoes is listed here, and
+  // every one goes through `safeUpstreamText` — `message` in the 400/default
+  // branches, `param` in the 400 branch, `request_id` in the trailing support
+  // hint. `code` is not echoed into the text but is sanitised anyway, because
+  // it is stored on the error and the next person to echo a field should not
+  // have to notice this distinction. If you add a field to this destructure,
+  // it goes through the funnel too.
+  const raw = envelope.error ?? {};
+  const code = safeUpstreamText(raw.code);
+  const requestId = safeUpstreamText(raw.request_id);
+  const param = safeUpstreamText(raw.param);
+  const message = safeUpstreamText(raw.message);
 
   let text: string;
   if (status === 401) {

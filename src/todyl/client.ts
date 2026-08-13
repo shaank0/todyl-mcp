@@ -1,5 +1,5 @@
 import type { TodylConfig } from '../config.js';
-import { TodylError, toTodylError } from './errors.js';
+import { safeUpstreamText, TodylError, toTodylError } from './errors.js';
 import type { TodylEnvelope } from './types.js';
 
 export type FetchFn = (
@@ -26,10 +26,16 @@ export interface TodylClient {
  * `?` is a programming error and fails loudly rather than reaching the network.
  */
 function assertNoQueryInPath(path: string): void {
-  if (path.includes('?')) {
+  // `#` too: a fragment would swallow the entire query string that follows it.
+  // Unreachable today (every path is a literal in repository.ts) — it is one
+  // character next to a check that already exists, and the cost of being wrong
+  // about "unreachable" here is a silently unfiltered request.
+  const offender = ['?', '#'].find((char) => path.includes(char));
+  if (offender) {
     throw new Error(
-      `Todyl client: path must not contain a query string (got "${path}"). ` +
-        'Pass parameters as the `query` argument so they are encoded exactly once.'
+      `Todyl client: path must not contain a query string or fragment — found ` +
+        `"${offender}" in "${path}". Pass parameters as the \`query\` argument ` +
+        'so they are encoded exactly once.'
     );
   }
 }
@@ -120,10 +126,18 @@ export function createClient(
         // unparseable body cannot be scrubbed structurally at all: there is no
         // safe preview to take, only a guess. Report what actually helps
         // diagnose a truncated response instead — status, size, content type.
-        const contentType = response!.headers?.get('content-type') ?? 'unknown';
+        // The header is upstream-controlled text like any other, so it goes
+        // through the same funnel — an attacker-influenced proxy could return
+        // a 100 KB content-type, and this string reaches the same places the
+        // body would have.
+        const contentType = safeUpstreamText(response!.headers?.get('content-type')) ?? 'unknown';
+        // byteLength, not .length: the latter counts UTF-16 code units, which
+        // understates any multi-byte body — and the number's whole purpose is
+        // to be compared against a Content-Length or a proxy's cutoff.
+        const byteCount = Buffer.byteLength(body);
         throw new TodylError(
           `Todyl returned a non-JSON response (status ${response!.status}, ` +
-            `${body.length} bytes, content-type ${contentType}). The body is not echoed ` +
+            `${byteCount} bytes, content-type ${contentType}). The body is not echoed ` +
             'because an unparseable response cannot be scrubbed of enrollment secrets. ' +
             'A truncated or proxy-mangled response is the usual cause.',
           response!.status,
