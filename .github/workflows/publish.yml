@@ -1,0 +1,91 @@
+name: publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run verify
+
+      - id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Build locally first and actually START the container before pushing.
+      # A publish that has never run the image is not a verified publish.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: todyl-mcp:ci
+
+      - name: Smoke test the built image
+        run: |
+          set -e
+          docker run -d --name smoke -p 8080:8080 \
+            -e TODYL_CLIENT_ID=dummy -e TODYL_ACCESS_TOKEN=dummy todyl-mcp:ci
+
+          ready=""
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/healthz || true)
+            if [ "$code" = "200" ]; then ready=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "::error::container never became healthy"; docker logs smoke; docker rm -f smoke; exit 1
+          fi
+
+          # /healthz only proves Express started. Prove the MCP wiring itself
+          # survived the build by driving the real Streamable HTTP endpoint:
+          # an initialize handshake, then tools/list, and assert the six
+          # tool names come back.
+          init=$(curl -s -X POST http://localhost:8080/mcp \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1.0"}}}')
+          echo "initialize response: $init"
+
+          list=$(curl -s -X POST http://localhost:8080/mcp \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+          echo "tools/list response: $list"
+
+          names=$(echo "$list" | sed -n 's/^data: //p' | jq -r '.result.tools[].name' | sort | tr '\n' ',')
+          expected="device-posture-summary,get-device,list-deployment-groups,list-devices,list-invoices,tenant-report,"
+          if [ "$names" != "$expected" ]; then
+            echo "::error::tools/list mismatch. got=[$names] want=[$expected]"
+            docker logs smoke; docker rm -f smoke; exit 1
+          fi
+
+          echo "Smoke test passed: healthz 200, six tools registered on /mcp"
+          docker rm -f smoke
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/shaank0/todyl-mcp:latest
+            ghcr.io/shaank0/todyl-mcp:sha-${{ steps.vars.outputs.sha_short }}
