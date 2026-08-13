@@ -89,6 +89,22 @@ describe('list-deployment-groups', () => {
     expect(result.content[0].text).toMatch(/Acme/);
     expect(result.content[0].text).toMatch(/Beta/);
   });
+
+  it('says the read was incomplete when denying a tenant on a TRUNCATED sweep', async () => {
+    const truncated = {
+      deploymentGroups: async () => ({ items: GROUPS, truncated: true }),
+    } as unknown as TodylRepository;
+    const result = await listDeploymentGroupsTool.execute({ tenant: 'Nope Ltd' }, truncated);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/not all deployment groups were read/i);
+  });
+
+  it('carries no incomplete caveat when the read was complete', async () => {
+    const result = await listDeploymentGroupsTool.execute({ tenant: 'Nope Ltd' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).not.toMatch(/incomplete/i);
+  });
 });
 
 describe('list-invoices', () => {
@@ -174,6 +190,27 @@ describe('list-invoices', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
     expect(result.content[0].text).toMatch(/Acme/);
+  });
+
+  it('says the read was incomplete when denying a tenant on a TRUNCATED sweep', async () => {
+    // Worst case for a billing tool: an unread page holds the client, and we
+    // answer that no such client exists.
+    const truncated = {
+      invoices: async () => ({ items: INVOICES, truncated: true }),
+    } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ tenant: 'Beta' }, truncated);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/not all invoices were read/i);
+  });
+
+  it('carries no incomplete caveat when the read was complete', async () => {
+    const repo = {
+      invoices: async () => ({ items: INVOICES, truncated: false }),
+    } as unknown as TodylRepository;
+    const result = await listInvoicesTool.execute({ tenant: 'Beta' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).not.toMatch(/incomplete/i);
   });
 
   it('filters by subtenant name and marks as covering multiple tenants', async () => {

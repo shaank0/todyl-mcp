@@ -108,6 +108,22 @@ describe('device-posture-summary', () => {
     expect(result.content[0].text).toMatch(/Beta/);
   });
 
+  it('says the read was incomplete when denying a tenant on a TRUNCATED sweep', async () => {
+    const truncated = {
+      devices: async () => ({ items: DEVICES, truncated: true }),
+    } as unknown as TodylRepository;
+    const result = await devicePostureSummaryTool.execute({ tenant: 'Nope Ltd' }, truncated);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/not all devices were read/i);
+  });
+
+  it('carries no incomplete caveat when the read was complete', async () => {
+    const result = await devicePostureSummaryTool.execute({ tenant: 'Nope Ltd' }, repo);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).not.toMatch(/incomplete/i);
+  });
+
   it('accepts stale_days: 0 and rejects a negative, like every other tool', () => {
     const schema = devicePostureSummaryTool.inputSchema.stale_days!;
     expect(schema.safeParse(0).success).toBe(true);

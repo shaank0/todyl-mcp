@@ -107,21 +107,32 @@ export const tenantReportTool: TodylTool = {
       !invoicesResult.ok && 'invoices',
     ].filter((label): label is string => Boolean(label));
     const incompleteNote = failedDatasets.length
-      ? ` This search was incomplete: ${failedDatasets.join(', ')} could not be read, so a match there would not have been found.`
+      ? `This search was incomplete: ${failedDatasets.join(', ')} could not be read, so a match there would not have been found.`
       : '';
 
-    const { ref: tenantRef, problem } = resolveTenantOrProblem(
+    // Computed before resolution because a not-found answer needs them too: a
+    // dataset that loaded but was TRUNCATED (page cap) or served STALE cached
+    // data is just as capable of not having reached this tenant as one that
+    // failed outright. Reused verbatim in the success payload below.
+    const warnings = [
+      devicesResult.ok ? warningFor(devicesResult.dataset, 'devices') : undefined,
+      groupsResult.ok ? warningFor(groupsResult.dataset, 'deployment groups') : undefined,
+      invoicesResult.ok ? warningFor(invoicesResult.dataset, 'invoices') : undefined,
+    ].filter((w): w is string => Boolean(w));
+
+    const resolved = resolveTenantOrProblem(
       [...allRefs.values()],
       tenant,
-      incompleteNote
+      [incompleteNote, ...warnings].filter(Boolean).join(' ')
     );
-    if (problem) return problem;
+    if (!resolved.ok) return resolved.problem;
+    const tenantRef = resolved.ref;
 
     // From here on, every dataset is filtered by the RESOLVED id, not by
     // re-matching the user's original string — the string was interpreted once.
     const posture = devicesResult.ok
       ? (() => {
-          const mine = devicesResult.dataset.items.filter((d) => isTenantId(d.tenant, tenantRef!.id));
+          const mine = devicesResult.dataset.items.filter((d) => isTenantId(d.tenant, tenantRef.id));
           return {
             devices: mine.length,
             stale: mine.filter((d) => isStale(d, staleDays, now)).length,
@@ -133,26 +144,20 @@ export const tenantReportTool: TodylTool = {
       : sectionError('devices', devicesResult.error);
 
     const deploymentGroups = groupsResult.ok
-      ? groupsResult.dataset.items.filter((g) => isTenantId(g.tenant, tenantRef!.id))
+      ? groupsResult.dataset.items.filter((g) => isTenantId(g.tenant, tenantRef.id))
       : sectionError('deployment groups', groupsResult.error);
 
     // Reuses list-invoices' own matching + covers_multiple_tenants marking (now
     // keyed on the resolved id) so the same question gets the same answer either way.
     const invoicesSection = invoicesResult.ok
-      ? filterInvoicesForTenantId(invoicesResult.dataset.items, tenantRef!.id)
+      ? filterInvoicesForTenantId(invoicesResult.dataset.items, tenantRef.id)
       : sectionError('invoices', invoicesResult.error);
-
-    const warnings = [
-      devicesResult.ok ? warningFor(devicesResult.dataset, 'devices') : undefined,
-      groupsResult.ok ? warningFor(groupsResult.dataset, 'deployment groups') : undefined,
-      invoicesResult.ok ? warningFor(invoicesResult.dataset, 'invoices') : undefined,
-    ].filter((w): w is string => Boolean(w));
 
     const incomplete = !devicesResult.ok || !groupsResult.ok || !invoicesResult.ok;
 
     return ok({
-      tenant: tenantRef!.name ?? tenant,
-      tenant_id: tenantRef!.id,
+      tenant: tenantRef.name ?? tenant,
+      tenant_id: tenantRef.id,
       incomplete,
       stale_days: staleDays,
       posture,

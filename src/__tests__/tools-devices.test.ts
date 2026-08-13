@@ -148,6 +148,32 @@ describe('list-devices', () => {
     expect(result.content[0].text).toMatch(/Beta/);
   });
 
+  it('says the read was incomplete when denying a tenant on a TRUNCATED sweep', async () => {
+    // "No such tenant" reads as authoritative — more so than `matched: 0` did —
+    // so denying a client on a read that stopped at the page cap could have
+    // someone conclude they were never onboarded. The denial must carry the caveat.
+    const result = await listDevicesTool.execute({ tenant: 'Nope Ltd' }, repo({ truncated: true }));
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/not all devices were read/i);
+  });
+
+  it('says the read was incomplete when denying a tenant on a STALE cached read', async () => {
+    const result = await listDevicesTool.execute(
+      { tenant: 'Nope Ltd' },
+      repo({ staleWarning: 'Todyl could not be refreshed (503)' })
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/503/);
+  });
+
+  it('carries no incomplete caveat when the read was complete, so the caveat stays meaningful', async () => {
+    const result = await listDevicesTool.execute({ tenant: 'Nope Ltd' }, repo());
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).not.toMatch(/incomplete/i);
+    expect(result.content[0].text).not.toMatch(/not all devices/i);
+  });
+
   it('accepts stale_days: 0 and rejects a negative, like every other tool', () => {
     const schema = listDevicesTool.inputSchema.stale_days!;
     expect(schema.safeParse(0).success).toBe(true);

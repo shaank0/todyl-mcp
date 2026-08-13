@@ -40,12 +40,15 @@ export const listDevicesTool: TodylTool = {
 
     if (tenant) {
       const candidates = dataset.items.map((d) => d.tenant).filter((t): t is TenantRef => Boolean(t));
-      const { ref, problem } = resolveTenantOrProblem(candidates, tenant);
-      if (problem) return problem;
+      // The warning goes with the not-found answer: if the sweep hit the page
+      // cap or served stale data, "no such tenant" might only mean "we stopped
+      // reading before reaching them".
+      const resolved = resolveTenantOrProblem(candidates, tenant, warningFor(dataset));
+      if (!resolved.ok) return resolved.problem;
       // Filter by the RESOLVED id, never by re-matching the raw search string —
       // an unrelated tenant whose opaque id happens to equal the search string
       // must not be folded into this client's device list.
-      filters.tenant_id = ref!.id;
+      filters.tenant_id = resolved.ref.id;
     }
 
     const matched = applyDeviceFilters(dataset.items, filters);

@@ -390,6 +390,18 @@ describe('tenant-report', () => {
     expect(JSON.stringify(out)).not.toContain('Randoco');
   });
 
+  it('a not-found answer says so when a dataset loaded but was TRUNCATED, not only when one failed', async () => {
+    // A dataset that hit the page cap is just as capable of not having reached
+    // this tenant as one that 403'd — the tenant may simply be on an unread page.
+    const result = await tenantReportTool.execute(
+      { tenant: 'Ghost Co' },
+      repo({ devicesOverride: { truncated: true } })
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/no todyl tenant matches/i);
+    expect(result.content[0].text).toMatch(/not all devices were read/i);
+  });
+
   it('a not-found answer omits the incomplete note when every dataset loaded', async () => {
     const result = await tenantReportTool.execute({ tenant: 'Ghost Co' }, repo());
     expect(result.isError).toBe(true);

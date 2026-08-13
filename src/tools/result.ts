@@ -72,25 +72,49 @@ export function ambiguousTenantErrorMultiRef<T>(
 /**
  * "No such tenant" — naming the tenants we actually know about, so the caller
  * can correct a typo instead of reading an empty result as "this client has
- * nothing". `note` appends a caveat when the search itself was incomplete
- * (e.g. a dataset that might have held the tenant failed to load).
+ * nothing".
+ *
+ * `note` MUST carry every caveat about how complete the search was: a dataset
+ * that failed to load, a sweep that hit the page cap, a stale cached read.
+ * "No such tenant" reads as authoritative — far more so than a `matched: 0` —
+ * and someone acting on it may conclude a client was never onboarded. If we
+ * stopped reading before reaching them, the denial has to say so in the same
+ * breath. Callers pass `warningFor(dataset, noun)` (and, for multi-dataset
+ * tools, their load-failure note) here.
  */
-export function unknownTenantError(refs: TenantRef[], tenant: string, note = ''): ToolResult {
+export function unknownTenantError(refs: TenantRef[], tenant: string, note?: string): ToolResult {
   const known = [...new Set(refs.map((r) => r.name).filter(Boolean))].sort();
+  const caveat = note?.trim() ? ` ${note.trim()}` : '';
   return toolError(
-    `No Todyl tenant matches "${tenant}". Known tenants: ${known.join(', ') || '(none)'}.${note}`
+    `No Todyl tenant matches "${tenant}". Known tenants: ${known.join(', ') || '(none)'}.${caveat}`
   );
 }
+
+/**
+ * The outcome of resolving a tenant string: either a resolved ref, or an error
+ * ToolResult to return as-is.
+ *
+ * Deliberately a DISCRIMINATED union on `ok` rather than `{ref?, problem?}`.
+ * With optional fields, a caller who forgets the guard writes `result.ref!.id`
+ * and gets a runtime crash; here `ref` does not exist on the type until `ok`
+ * has been narrowed, so `tsc` rejects it. The specific oversight this encodes —
+ * "resolve, then use the result without handling the failure branch" — has
+ * recurred four times in this file's history, which is enough evidence that
+ * convention is not holding it and the compiler should.
+ */
+export type TenantResolution =
+  | { ok: true; ref: TenantRef }
+  | { ok: false; problem: ToolResult };
 
 /**
  * Resolve a caller-supplied tenant string to exactly ONE tenant ref, against
  * the complete candidate set, exactly once. This is the single entry point for
  * every tool that accepts a `tenant` argument.
  *
- * Returns either `{ ref }` — resolved, and the ONLY thing a filter may key off
- * is `ref.id` (see `isTenantId`) — or `{ problem }`, an error ToolResult to
- * return directly. There is deliberately no third "nothing matched, carry on"
- * outcome: an earlier design returned `{}` there and left callers writing
+ * Returns either `{ ok: true, ref }` — resolved, and the ONLY thing a filter
+ * may key off is `ref.id` (see `isTenantId`) — or `{ ok: false, problem }`, an
+ * error ToolResult to return directly. There is deliberately no third "nothing
+ * matched, carry on" outcome: an earlier design returned `{}` there and left callers writing
  * `resolvedId ?? tenant`, which fell back to filtering by the RAW string. That
  * was harmless only while resolution and raw matching happened to agree on the
  * empty case, and it re-opened the cross-client merge the moment they diverged.
@@ -101,22 +125,28 @@ export function unknownTenantError(refs: TenantRef[], tenant: string, note = '')
  * name-first/id-fallback precedence is a SET-level policy (see its docs).
  * Callers collect every ref every item carries — unconditionally, unfiltered —
  * and call this once.
+ *
+ * `notFoundNote` carries how complete the underlying read was — see
+ * `unknownTenantError`. Every caller must pass its dataset's warning.
  */
 export function resolveTenantOrProblem(
   refs: TenantRef[],
   tenant: string,
-  notFoundNote = ''
-): { ref?: TenantRef; problem?: ToolResult } {
+  notFoundNote?: string
+): TenantResolution {
   const matches = resolveTenantMatches(refs, tenant);
-  if (matches.length === 0) return { problem: unknownTenantError(refs, tenant, notFoundNote) };
+  if (matches.length === 0) {
+    return { ok: false, problem: unknownTenantError(refs, tenant, notFoundNote) };
+  }
   if (matches.length > 1) {
     return {
+      ok: false,
       problem:
         ambiguousTenantErrorMultiRef(matches, tenant, (ref) => [ref]) ??
         toolError(`More than one tenant matches "${tenant}".`),
     };
   }
-  return { ref: matches[0] };
+  return { ok: true, ref: matches[0] };
 }
 
 /**

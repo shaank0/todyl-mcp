@@ -21,12 +21,18 @@ export const listDeploymentGroupsTool: TodylTool = {
     let groups = dataset.items;
     if (tenant) {
       const candidates = dataset.items.map((g) => g.tenant).filter((t): t is TenantRef => Boolean(t));
-      const { ref, problem } = resolveTenantOrProblem(candidates, tenant);
-      if (problem) return problem;
+      // The warning goes with the not-found answer — a truncated or stale read
+      // must not deny a tenant it may simply never have reached.
+      const resolved = resolveTenantOrProblem(
+        candidates,
+        tenant,
+        warningFor(dataset, 'deployment groups')
+      );
+      if (!resolved.ok) return resolved.problem;
       // Filter by the RESOLVED id, never by re-matching the raw search string —
       // an unrelated tenant whose opaque id happens to equal the search string
       // must not be folded into this client's group list.
-      groups = dataset.items.filter((g) => isTenantId(g.tenant, ref!.id));
+      groups = dataset.items.filter((g) => isTenantId(g.tenant, resolved.ref.id));
     }
 
     return ok({

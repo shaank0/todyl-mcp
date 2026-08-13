@@ -112,14 +112,17 @@ export const listInvoicesTool: TodylTool = {
     let invoices: (Invoice & { covers_multiple_tenants?: true })[] = dataset.items;
     if (tenant) {
       const candidates = dataset.items.flatMap((inv) => invoiceTenantRefs(inv));
-      const { ref, problem } = resolveTenantOrProblem(candidates, tenant);
-      if (problem) return problem;
+      // The warning goes with the not-found answer — denying that a client
+      // exists on the strength of a read that stopped early is the same
+      // unsupported confidence as reporting a wrong total.
+      const resolved = resolveTenantOrProblem(candidates, tenant, warningFor(dataset, 'invoices'));
+      if (!resolved.ok) return resolved.problem;
       // Filter (and mark covers_multiple_tenants) by the RESOLVED id, never by
       // re-matching the raw search string — an unrelated tenant whose opaque id
       // happens to equal the search string must not be folded into this client's
       // invoice list. Someone else's bill inside this client's is the worst
       // version of this bug.
-      invoices = filterInvoicesForTenantId(dataset.items, ref!.id);
+      invoices = filterInvoicesForTenantId(dataset.items, resolved.ref.id);
     }
 
     return ok({
