@@ -37,6 +37,14 @@ jobs:
           context: .
           push: false
           load: true
+          # provenance/sbom default to true, which makes buildx emit an image
+          # index carrying an attestation manifest. `load: true` hands that to
+          # the daemon, but the attestation blob is not a layer the daemon can
+          # upload — the later `docker push` then fails with "unknown blob".
+          # Turning both off keeps the loaded image a plain single-platform
+          # image, so the artifact we smoke-test is the artifact we can push.
+          provenance: false
+          sbom: false
           tags: |
             ghcr.io/shaank0/todyl-mcp:latest
             ghcr.io/shaank0/todyl-mcp:sha-${{ steps.vars.outputs.sha_short }}
